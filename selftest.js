@@ -8,9 +8,12 @@
    ========================================================================== */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const {
   scanProjects,
+  scanRoots,
   setTaskDone,
   readJsonSafe,
   enrichTasks,
@@ -39,6 +42,22 @@ const {
   importChecklist,
   planToCsv,
   planToMarkdown,
+  // team sync
+  validateBinding,
+  readBinding,
+  readBindingFile,
+  writeBinding,
+  runGit,
+  gitStatus,
+  gitPull,
+  gitCommit,
+  gitPush,
+  gitInit,
+  gitBind,
+  gitClone,
+  gitSync,
+  deriveCommitMessage,
+  commitMessageFromDiff,
 } = require('./data');
 
 const ROOT = process.env.PROJECT_CONSOLE_ROOT || DEFAULT_ROOT;
@@ -498,9 +517,184 @@ try {
 check('real _demo/plan.json untouched by pass-2 tests', realPlanBefore === fs.readFileSync(path.join(ROOT, '_demo', 'plan.json'), 'utf8'));
 check('real _demo/progress.json untouched by pass-2 tests', realProgressBefore === fs.readFileSync(path.join(ROOT, '_demo', 'progress.json'), 'utf8'));
 
-/* -- 9. verdict ----------------------------------------------------------- */
+/* -- 9. team sync: binding (.pcproject.json) + git layer (TEMP repos) ------ */
+/*
+ * Everything here runs against throwaway repos under a temp dir — never the
+ * vault and never the real app repo's git state.
+ */
 
 console.log('');
-console.log(`checks: ${passed} passed, ${failed} failed`);
-console.log(failed === 0 ? 'RESULT: PASS' : 'RESULT: FAIL');
-process.exit(failed === 0 ? 0 : 1);
+console.log('Team sync — binding + git (temp repos):');
+
+// NOTE: the git tests MUST live outside this repo (os.tmpdir()), otherwise the
+// temp "project" folders would be inside the app's own work tree and every
+// `git rev-parse --is-inside-work-tree` would report true.
+const gitTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-selftest-git-'));
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'Selftest',
+  GIT_AUTHOR_EMAIL: 'selftest@example.com',
+  GIT_COMMITTER_NAME: 'Selftest',
+  GIT_COMMITTER_EMAIL: 'selftest@example.com',
+  GIT_TERMINAL_PROMPT: '0',
+};
+function gitx(args, cwd) {
+  return String(execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' })).trim();
+}
+
+(async () => {
+  // data.js gitEnv() spreads process.env, so give this test process a git
+  // identity (temp repos have none of their own).
+  process.env.GIT_AUTHOR_NAME = 'Selftest';
+  process.env.GIT_AUTHOR_EMAIL = 'selftest@example.com';
+  process.env.GIT_COMMITTER_NAME = 'Selftest';
+  process.env.GIT_COMMITTER_EMAIL = 'selftest@example.com';
+
+  const gRoot = path.join(gitTmp, 'projects');
+  const pdir = path.join(gRoot, 'gp');
+  fs.mkdirSync(pdir, { recursive: true });
+  fs.writeFileSync(
+    path.join(pdir, 'plan.json'),
+    JSON.stringify({
+      schema: 'omo-project/plan@2',
+      id: 'gp',
+      title: 'GP',
+      created: '2026-10-11',
+      target: '2026-10-20',
+      phases: [{ id: 'P1', name: 'P' }],
+      tasks: [
+        {
+          id: 'T1.1',
+          phase: 'P1',
+          title: 't',
+          owner: 'Jack',
+          start: '2026-10-11',
+          estimate_days: 1,
+          deps: [],
+          deliverable: '',
+          acceptance: '',
+          outputs: [],
+        },
+      ],
+      milestones: [],
+      risks: [],
+    }),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(pdir, 'progress.json'),
+    JSON.stringify({ schema: 'omo-project/progress@1', project: 'gp', updated: null, tasks: {} }),
+    'utf8'
+  );
+
+  /* --- binding ----------------------------------------------------------- */
+  check('validateBinding accepts a full binding', validateBinding({ remote: 'https://x/y.git', branch: 'main', projectId: 'gp' }).ok);
+  check('validateBinding defaults branch to main', validateBinding({ remote: 'https://x/y.git' }).binding.branch === 'main');
+  check('validateBinding rejects empty remote', validateBinding({ remote: '', branch: 'main' }).ok === false);
+  check('validateBinding rejects a leading-dash branch', validateBinding({ remote: 'https://x/y.git', branch: '-bad' }).ok === false);
+  check('validateBinding rejects a traversal projectId', validateBinding({ remote: 'https://x/y.git', projectId: '..' }).ok === false);
+
+  const wb = writeBinding(gRoot, 'gp', { remote: 'https://example.com/gp.git', branch: 'main' });
+  check('writeBinding writes .pcproject.json', wb.ok && fs.existsSync(path.join(pdir, '.pcproject.json')), wb.error);
+  const rb = readBinding(gRoot, 'gp');
+  check(
+    'readBinding round-trips remote + projectId',
+    rb.ok && rb.binding.remote === 'https://example.com/gp.git' && rb.binding.projectId === 'gp',
+    JSON.stringify(rb.binding)
+  );
+  const badBindPath = path.join(gitTmp, 'badbind');
+  fs.mkdirSync(badBindPath, { recursive: true });
+  fs.writeFileSync(path.join(badBindPath, '.pcproject.json'), '{ not json ', 'utf8');
+  check('readBindingFile reports malformed json', readBindingFile(badBindPath).ok === false);
+  check('writeBinding rejects an escaping projectId', writeBinding(gRoot, '../x', { remote: 'https://x/y.git' }).ok === false);
+
+  /* --- git init + commit message ---------------------------------------- */
+  check('gitStatus before init: isRepo=false', (await gitStatus(gRoot, 'gp')).isRepo === false);
+  const ini = await gitInit(gRoot, 'gp');
+  check('gitInit ok', ini.ok, ini.error);
+  let st = await gitStatus(gRoot, 'gp');
+  check('gitStatus isRepo=true after init', st.isRepo === true);
+  check('gitStatus clean after the init commit', st.dirty === false, JSON.stringify(st.lastCommit));
+  check('gitStatus exposes lastCommit', !!st.lastCommit && !!st.lastCommit.hash && !!st.lastCommit.author);
+
+  setTaskDone(gRoot, 'gp', 'T1.1', true);
+  st = await gitStatus(gRoot, 'gp');
+  check('gitStatus dirty after a tick', st.dirty === true);
+  const msg = await deriveCommitMessage(gRoot, 'gp');
+  check('deriveCommitMessage = tick: T1.1 done by Jack', msg === 'tick: T1.1 done by Jack', msg);
+
+  const c = await gitCommit(gRoot, 'gp', msg);
+  check('gitCommit ok', c.ok && c.committed, c.error);
+  check('gitStatus clean after commit', (await gitStatus(gRoot, 'gp')).dirty === false);
+  check('gitCommit with an empty message is rejected', (await gitCommit(gRoot, 'gp', '')).ok === false);
+
+  /* --- bind remote + push + pull ---------------------------------------- */
+  const gOrigin = path.join(gitTmp, 'origin.git');
+  gitx(['init', '--bare', '-b', 'main', gOrigin], gitTmp);
+  const bind = await gitBind(gRoot, 'gp', gOrigin, { branch: 'main' });
+  check('gitBind sets origin + rewrites binding', bind.ok, bind.error);
+  const st2 = await gitStatus(gRoot, 'gp');
+  check('gitStatus remote = origin path', st2.remote === gOrigin, st2.remote);
+  const push = await gitPush(gRoot, 'gp');
+  check('gitPush (first push, sets upstream) ok', push.ok, push.error);
+  const st3 = await gitStatus(gRoot, 'gp');
+  check(
+    'after first push: hasUpstream, ahead/behind = 0/0',
+    st3.hasUpstream && st3.ahead === 0 && st3.behind === 0,
+    JSON.stringify({ up: st3.hasUpstream, ahead: st3.ahead, behind: st3.behind })
+  );
+
+  /* --- clone ------------------------------------------------------------- */
+  const cloneDir = path.join(gitTmp, 'cloned', 'gp');
+  const cl = await gitClone(gOrigin, cloneDir);
+  check('gitClone ok', cl.ok, cl.error);
+  check('cloned plan.json present', fs.existsSync(path.join(cloneDir, 'plan.json')));
+  check('gitClone derives projectId from plan.json', cl.projectId === 'gp', cl.projectId);
+  check('gitClone refuses a non-empty destination', (await gitClone(gOrigin, cloneDir)).ok === false);
+
+  /* --- full sync (pull → auto-commit → push) ---------------------------- */
+  setTaskDone(gRoot, 'gp', 'T1.1', false);
+  const sync = await gitSync(gRoot, 'gp', {});
+  check('gitSync ok', sync.ok, sync.error || JSON.stringify(sync.steps));
+  check('gitSync auto-committed an untick message', sync.committed && /untick: T1\.1/.test(sync.message || ''), sync.message);
+  check('gitSync pushed', sync.pushed === true);
+  check('gitSync leaves a clean tree', (await gitStatus(gRoot, 'gp')).dirty === false);
+
+  /* --- safety ------------------------------------------------------------ */
+  check('gitStatus rejects a traversal projectId', (await gitStatus(gRoot, '../x')).ok === false);
+  check('gitClone rejects an empty url', (await gitClone('', path.join(gitTmp, 'z'))).ok === false);
+  check('gitClone rejects an unsupported scheme', (await gitClone('ftp://x/y', path.join(gitTmp, 'z2'))).ok === false);
+  const badGit = await runGit(['definitely-not-a-command'], gRoot);
+  check('runGit never throws on a bad command', badGit.ok === false && typeof badGit.timedOut === 'boolean');
+
+  /* --- multi-root scan --------------------------------------------------- */
+  const merged = scanRoots([gRoot, path.join(gitTmp, 'cloned')]);
+  check('scanRoots merges roots and finds the project', merged.projects.some((p) => p.id === 'gp'), merged.projects.map((p) => p.id).join(','));
+
+  /* --- pure message helper ---------------------------------------------- */
+  check(
+    'commitMessageFromDiff: plan edit',
+    commitMessageFromDiff({ tasks: [{ id: 'T2.3', title: 'a' }] }, { tasks: {} }, { tasks: [{ id: 'T2.3', title: 'b' }] }, { tasks: {} }) === 'plan: edit T2.3'
+  );
+  check(
+    'commitMessageFromDiff: plan add',
+    commitMessageFromDiff({ tasks: [] }, { tasks: {} }, { tasks: [{ id: 'T5.3' }] }, { tasks: {} }) === 'plan: +T5.3'
+  );
+})()
+  .catch((err) => {
+    failed++;
+    console.log('  FAIL team-sync section threw: ' + (err && err.stack ? err.stack : err));
+  })
+  .finally(() => {
+    try {
+      fs.rmSync(gitTmp, { recursive: true, force: true });
+    } catch (_) {
+      /* ignore */
+    }
+
+    /* -- 10. verdict ------------------------------------------------------ */
+    console.log('');
+    console.log(`checks: ${passed} passed, ${failed} failed`);
+    console.log(failed === 0 ? 'RESULT: PASS' : 'RESULT: FAIL');
+    process.exit(failed === 0 ? 0 : 1);
+  });

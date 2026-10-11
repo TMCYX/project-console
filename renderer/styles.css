@@ -2548,3 +2548,59 @@ html.print-export .wbs-canvas { transform-origin: top left; }
   }
   .guide__content { padding: 2px 18px 72px; }
 }
+
+/* --- Team sync (git): status chip + bind / clone forms ------------------- */
+
+.syncchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--rule-strong);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  white-space: nowrap;
+  user-select: none;
+}
+.syncchip::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: none;
+  background: var(--ink-3);
+}
+.syncchip.is-clean { color: var(--rag-green); border-color: var(--rag-green); }
+.syncchip.is-clean::before { background: var(--rag-green); }
+.syncchip.is-dirty { color: var(--rag-amber); border-color: var(--rag-amber); }
+.syncchip.is-dirty::before { background: var(--rag-amber); }
+.syncchip.is-behind { color: var(--vermilion); border-color: var(--vermilion); }
+.syncchip.is-behind::before { background: var(--vermilion); }
+.syncchip.is-ahead { color: var(--rag-green); border-color: var(--rag-green); }
+.syncchip.is-ahead::before { background: var(--rag-green); }
+.syncchip.is-off { color: var(--ink-3); }
+.syncchip.is-busy { color: var(--ink); border-color: var(--ink); }
+.syncchip.is-busy::before { background: var(--ink); animation: syncpulse 1s ease-in-out infinite; }
+@keyframes syncpulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
+.gitform,
+.gitclone {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  margin: 0 0 12px;
+  border: 1px solid var(--rule);
+  background: var(--paper-2);
+}
+.gitclone { margin: 8px 0 16px; }
+.gitform .fin,
+.gitclone .fin { min-width: 220px; }
+.gitform .note,
+.gitclone .note { font-size: 11px; color: var(--ink-3); }

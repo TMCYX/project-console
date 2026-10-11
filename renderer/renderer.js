@@ -68,6 +68,12 @@ const state = {
   showBulk: false,
   exportMenu: false,
   guideOpen: false, // 使用說明 overlay
+  // Team sync (git): per-project status + flows.
+  git: {}, // projectId -> git status object
+  gitBusy: {}, // projectId -> true while a git op runs
+  gitBindOpen: false, // project toolbar: bind-remote form
+  gitCloneOpen: false, // dashboard: 加入 Git 專案 form
+  gitCloneBusy: false,
 };
 
 const RAG_RANK = { red: 3, amber: 2, green: 1, grey: 0 };
@@ -494,8 +500,10 @@ function renderDashboard() {
             .map(([k, label]) => `<option value="${k}"${state.sort === k ? ' selected' : ''}>${label}</option>`)
             .join('')}
         </select>
+        <button class="btn btn--ghost${state.gitCloneOpen ? ' is-on' : ''}" type="button" data-git-clone-toggle title="由 repo URL clone 一個 git 專案">＋加入 Git 專案</button>
       </div>
     </div>
+    ${state.gitCloneOpen ? renderGitClonePanel() : ''}
     <div class="dash__stats">
       ${dstat('專案', all.length)}
       ${dstat('未完成', open)}
@@ -690,6 +698,9 @@ function renderProject(p) {
   }
         </span>
         <span class="ptb__spacer"></span>
+        ${syncChipHtml(p.id)}
+        <button class="btn btn--ghost" type="button" data-git-sync title="Pull → 自動 commit → Push（git sync）">Sync</button>
+        <button class="btn btn--ghost${state.gitBindOpen ? ' is-on' : ''}" type="button" data-git-bind title="綁定 / 更換 git remote">Git…</button>
         <button class="btn" type="button" data-add-task title="新增任務 (n)">＋任務</button>
         <button class="btn btn--ghost" type="button" data-reschedule title="依 deps 重排 start">重排</button>
         <button class="btn btn--ghost${state.showCritical ? ' is-on' : ''}" type="button" data-toggle-critical title="關鍵路徑標示">關鍵</button>
@@ -700,6 +711,7 @@ function renderProject(p) {
       </div>
       ${state.exportMenu ? renderExportMenu() : ''}
       ${state.menuOpen ? renderOverflowMenu(p) : ''}
+      ${state.gitBindOpen ? renderGitBindForm() : ''}
       <nav class="tabs">${tabs}</nav>
       ${state.showBackups ? renderBackups(p) : ''}
       ${body}
@@ -725,6 +737,65 @@ function renderOverflowMenu(p) {
     <button class="btn btn--ghost" type="button" data-freeze-baseline title="凍結基準線 (freeze baseline)">凍結基準線</button>
     <button class="btn btn--ghost${state.showBackups ? ' is-on' : ''}" type="button" data-show-backups title="備份清單 / 還原 (backups)">備份清單</button>
     ${slipSummary(p)}
+  </div>`;
+}
+
+/* ------------------------------ team sync: UI ---------------------------- */
+
+/** State chip for a project's git status (未連接 / 同步中 / 有本地改動 / 落後 N / 領先 N / 已最新). */
+function syncChipHtml(pid) {
+  const g = state.git[pid];
+  let label = '未連接';
+  let cls = 'is-off';
+  let title = '未連接 git';
+  if (state.gitBusy[pid]) {
+    label = '同步中';
+    cls = 'is-busy';
+    title = '同步中…';
+  } else if (g && g.isRepo) {
+    if (g.dirty) {
+      label = '有本地改動';
+      cls = 'is-dirty';
+      title = '有未 commit 改動';
+    } else if (g.behind > 0) {
+      label = '落後 ' + g.behind;
+      cls = 'is-behind';
+      title = `落後 remote ${g.behind} 個 commit`;
+    } else if (g.ahead > 0) {
+      label = '領先 ' + g.ahead;
+      cls = 'is-ahead';
+      title = `領先 remote ${g.ahead} 個 commit`;
+    } else {
+      label = '已最新';
+      cls = 'is-clean';
+      title = g.remote ? 'remote: ' + g.remote : '已最新';
+    }
+  } else if (g && g.remote) {
+    cls = 'is-off';
+    label = '未連接';
+    title = '未初始化 git（remote: ' + g.remote + '）';
+  }
+  return `<span class="syncchip ${cls}" data-sync-chip title="${esc(title)}">${esc(label)}</span>`;
+}
+
+function renderGitBindForm() {
+  return `<div class="gitform">
+    <span class="kicker">綁定 git remote</span>
+    <input class="fin fin--wide" type="text" data-git-remote placeholder="https://github.com/&lt;owner&gt;/&lt;repo&gt;.git">
+    <button class="btn" type="button" data-git-bind-go>綁定</button>
+    <button class="btn btn--ghost" type="button" data-git-bind-cancel>取消</button>
+    <span class="note">綁定後用 Sync 掣 pull / commit / push。</span>
+  </div>`;
+}
+
+function renderGitClonePanel() {
+  return `<div class="gitclone">
+    <span class="kicker">加入 Git 專案</span>
+    <input class="fin fin--wide" type="text" data-git-clone-url placeholder="https://github.com/&lt;owner&gt;/&lt;repo&gt;.git" autofocus>
+    <input class="fin fin--wide" type="text" data-git-clone-dir placeholder="目標資料夾（預設 ~/ProjectConsole/&lt;name&gt;）">
+    <button class="btn" type="button" data-git-clone-go${state.gitCloneBusy ? ' disabled' : ''}>${state.gitCloneBusy ? 'Clone 中…' : 'Clone'}</button>
+    <button class="btn btn--ghost" type="button" data-git-clone-cancel>取消</button>
+    <span class="note">clone 後會自動開啟該專案。</span>
   </div>`;
 }
 
@@ -2355,6 +2426,7 @@ function afterWrite(res, okMsg, label) {
     state.lastWriteAt = Date.now();
     recordOp(res, p && p.id, label || okMsg);
     if (okMsg) toast(okMsg);
+    if (p) loadGitStatus(p.id).then(render);
   } else {
     toast('失敗：' + ((res && res.error) || 'unknown'));
   }
@@ -3008,6 +3080,109 @@ async function doRestoreBackup(ts) {
   render();
 }
 
+/* ------------------------------ team sync: actions ----------------------- */
+
+async function loadGitStatus(pid) {
+  if (!pid) return;
+  try {
+    const r = await window.api.gitStatus(pid);
+    if (r && r.isRepo !== undefined) state.git[pid] = r;
+  } catch (_) {
+    /* status is best-effort */
+  }
+}
+
+async function doGitBind() {
+  const p = currentProject();
+  if (!p) return;
+  const inp = document.querySelector('[data-git-remote]');
+  const remote = inp ? inp.value.trim() : '';
+  if (!remote) {
+    toast('請輸入 repo URL');
+    return;
+  }
+  state.gitBusy[p.id] = true;
+  render();
+  try {
+    const r = await window.api.gitBind(p.id, remote, { branch: 'main' });
+    if (r && r.ok) {
+      toast('已綁定 remote');
+      state.gitBindOpen = false;
+    } else {
+      toast('綁定失敗：' + ((r && r.error) || ''));
+    }
+  } catch (err) {
+    toast('綁定失敗：' + err.message);
+  } finally {
+    delete state.gitBusy[p.id];
+    await loadGitStatus(p.id);
+    render();
+  }
+}
+
+async function doSync() {
+  const p = currentProject();
+  if (!p) return;
+  if (state.gitBusy[p.id]) return;
+  state.gitBusy[p.id] = true;
+  render();
+  try {
+    const r = await window.api.gitSync(p.id, {});
+    if (r && r.ok) {
+      const bits = [];
+      if (r.pulled) bits.push('已 pull');
+      if (r.committed) bits.push(r.message ? '已 commit「' + r.message + '」' : '已 commit');
+      else bits.push('無新改動');
+      if (r.pushed) bits.push('已 push');
+      toast('Sync 完成 · ' + bits.join(' · '));
+    } else {
+      toast('Sync 失敗' + (r && r.phase ? '（' + r.phase + '）' : '') + '：' + ((r && r.error) || ''));
+    }
+  } catch (err) {
+    toast('Sync 失敗：' + err.message);
+  } finally {
+    delete state.gitBusy[p.id];
+    try {
+      const pl = await window.api.refresh();
+      applyPayload(pl);
+    } catch (_) {
+      /* refresh is best-effort */
+    }
+    await loadGitStatus(p.id);
+    render();
+  }
+}
+
+async function doGitClone() {
+  const urlEl = document.querySelector('[data-git-clone-url]');
+  const dirEl = document.querySelector('[data-git-clone-dir]');
+  const url = urlEl ? urlEl.value.trim() : '';
+  const destDir = dirEl && dirEl.value.trim() ? dirEl.value.trim() : undefined;
+  if (!url) {
+    toast('請輸入 repo URL');
+    return;
+  }
+  state.gitCloneBusy = true;
+  render();
+  try {
+    const r = await window.api.gitClone(url, destDir);
+    if (r && r.ok) {
+      toast('已 clone ' + (r.name || r.projectId || ''));
+      const pl = await window.api.refresh();
+      applyPayload(pl);
+      state.gitCloneOpen = false;
+      if (r.projectId) selectProject(r.projectId);
+    } else {
+      toast('Clone 失敗：' + ((r && r.error) || ''));
+    }
+  } catch (err) {
+    toast('Clone 失敗：' + err.message);
+  } finally {
+    state.gitCloneBusy = false;
+    render();
+  }
+}
+
 function setPanelWidth(w) {
   state.panelWidth = clamp(w, 320, 720);
   applyPanelWidth();
@@ -3208,6 +3383,7 @@ function selectProject(id) {
   persist(LS.project, id);
   render();
   loadBaselineFor(id);
+  loadGitStatus(id).then(render);
   if (state.showBackups) loadBackupList(id).then(render);
   const main = document.getElementById('main');
   if (main) main.scrollTop = 0;
@@ -3277,6 +3453,30 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('#density-btn')) {
     state.density = state.density === 'compact' ? 'cozy' : 'compact';
     persist('pc.density', state.density);
+    render();
+    return;
+  }
+  // Team sync (git)
+  if (e.target.closest('[data-git-sync]')) return doSync();
+  if (e.target.closest('[data-git-bind-go]')) return doGitBind();
+  if (e.target.closest('[data-git-bind]')) {
+    state.gitBindOpen = !state.gitBindOpen;
+    render();
+    return;
+  }
+  if (e.target.closest('[data-git-bind-cancel]')) {
+    state.gitBindOpen = false;
+    render();
+    return;
+  }
+  if (e.target.closest('[data-git-clone-go]')) return doGitClone();
+  if (e.target.closest('[data-git-clone-toggle]')) {
+    state.gitCloneOpen = !state.gitCloneOpen;
+    render();
+    return;
+  }
+  if (e.target.closest('[data-git-clone-cancel]')) {
+    state.gitCloneOpen = false;
     render();
     return;
   }
@@ -3615,6 +3815,7 @@ document.addEventListener('change', async (e) => {
     } else {
       recordOp(res, projectId, done ? '標記完成 ' + taskId : '取消完成 ' + taskId);
       toast(done ? `已標記完成 ${taskId}` : `已取消 ${taskId}`);
+      loadGitStatus(projectId).then(render);
     }
   } catch (err) {
     cb.checked = !done;
@@ -3724,6 +3925,7 @@ async function init() {
   try {
     const payload = await window.api.getProjects();
     applyPayload(payload);
+    if (state.selectedProjectId) loadGitStatus(state.selectedProjectId).then(render);
   } catch (err) {
     const l = document.getElementById('landing');
     if (l) l.innerHTML = '<div class="empty">讀取失敗: ' + esc(err.message) + '</div>';

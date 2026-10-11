@@ -94,4 +94,18 @@ contextBridge.exposeInMainWorld('api', {
   backupRestore: async () => ok(),
   restoreFile: async () => ok(),
   restoreFileRaw: async () => ok(),
+  // team sync (git) — inert stubs so the renderer boots without a real repo
+  gitStatus: async () => ({
+    ok: true, isRepo: false, remote: null, branch: null, ahead: 0, behind: 0,
+    dirty: false, lastCommit: null, bound: false, hasUpstream: false, binding: null,
+  }),
+  gitReadBinding: async () => ({ ok: true, binding: null }),
+  gitPull: async () => ok({ stdout: '' }),
+  gitCommit: async () => ok({ committed: false }),
+  gitPush: async () => ok({ stdout: '' }),
+  gitInit: async () => ok({ committed: true }),
+  gitBind: async () => ok({ binding: { remote: 'stub', branch: 'main' } }),
+  gitSync: async () => ok({ committed: false, pulled: false, pushed: false, message: 'sync' }),
+  gitClone: async () => ({ ok: false, error: 'stub: no real clone in this harness' }),
+  gitRoots: async () => [],
 });

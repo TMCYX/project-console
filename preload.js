@@ -39,6 +39,17 @@ contextBridge.exposeInMainWorld('api', {
   backupRestore: (projectId, ts) => ipcRenderer.invoke('backup:restore', { projectId, ts }),
   restoreFile: (projectId, file, content) => ipcRenderer.invoke('file:restore', { projectId, file, content }),
   restoreFileRaw: (projectId, file, raw) => ipcRenderer.invoke('file:restoreRaw', { projectId, file, raw }),
+  // team sync: git layer
+  gitStatus: (projectId) => ipcRenderer.invoke('git:status', { projectId }),
+  gitReadBinding: (projectId) => ipcRenderer.invoke('git:readBinding', { projectId }),
+  gitPull: (projectId) => ipcRenderer.invoke('git:pull', { projectId }),
+  gitCommit: (projectId, message, opts) => ipcRenderer.invoke('git:commit', { projectId, message, opts }),
+  gitPush: (projectId) => ipcRenderer.invoke('git:push', { projectId }),
+  gitInit: (projectId, opts) => ipcRenderer.invoke('git:init', { projectId, opts }),
+  gitBind: (projectId, remote, opts) => ipcRenderer.invoke('git:bind', { projectId, remote, opts }),
+  gitSync: (projectId, opts) => ipcRenderer.invoke('git:sync', { projectId, opts }),
+  gitClone: (url, destDir) => ipcRenderer.invoke('git:clone', { url, destDir }),
+  gitRoots: () => ipcRenderer.invoke('git:roots'),
   onUpdate: (cb) => {
     const handler = (_event, payload) => cb(payload);
     ipcRenderer.on('projects:update', handler);
