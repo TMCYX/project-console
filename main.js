@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -42,8 +42,11 @@ const {
   gitSync,
   readBinding,
   validateCloneUrl,
+  gitIdentityInfo,
+  setGitIdentity,
 } = require('./data');
 const gitx = require('./gitx');
+const github = require('./github');
 
 app.setName('Project Console');
 if (process.platform === 'win32') app.setAppUserModelId('com.jack.projectconsole');
@@ -60,6 +63,65 @@ const PRIMARY_ROOT = process.env.PROJECT_CONSOLE_ROOT || DEFAULT_ROOT;
 /* Roots scanned by the app: the primary root plus any extra roots persisted
  * from previously cloned projects (dashboard → 加入 Git 專案). */
 const dataRoots = [path.resolve(PRIMARY_ROOT)];
+
+/* -------- in-app GitHub connection (encrypted token, no gh needed) -------- */
+/*
+ * The token is stored (safeStorage-encrypted when available) under userData and
+ * is never returned to the renderer or logged. Only `authContext()` reads it, to
+ * pass a per-command git URL / REST Authorization header.
+ */
+let githubStore = null;
+let githubAccount = null;
+let githubAccountLoaded = false;
+
+function getGithubStore() {
+  if (!githubStore) {
+    githubStore = github.createTokenStore({ dir: app.getPath('userData'), safeStorage });
+  }
+  return githubStore;
+}
+function githubAccountPath() {
+  return path.join(app.getPath('userData'), 'github-account.json');
+}
+function loadGithubAccount() {
+  if (githubAccountLoaded) return githubAccount;
+  githubAccountLoaded = true;
+  try {
+    const p = githubAccountPath();
+    if (fs.existsSync(p)) githubAccount = JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (_) {
+    githubAccount = null;
+  }
+  return githubAccount;
+}
+function saveGithubAccount(acc) {
+  githubAccount = acc;
+  githubAccountLoaded = true;
+  try {
+    const p = githubAccountPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(acc, null, 2) + '\n', 'utf8');
+  } catch (_) {
+    /* best effort (avatar/login are non-secret) */
+  }
+}
+function clearGithubAccount() {
+  githubAccount = null;
+  githubAccountLoaded = true;
+  try {
+    const p = githubAccountPath();
+    if (fs.existsSync(p)) fs.rmSync(p, { force: true });
+  } catch (_) {
+    /* best effort */
+  }
+}
+/** { token, account } for git ops — nulls when not connected. */
+function authContext() {
+  const token = getGithubStore().read();
+  if (!token) return { token: null, account: null };
+  const acc = loadGithubAccount();
+  return { token, account: acc && acc.login ? { login: acc.login, id: acc.id } : null };
+}
 
 function rootsConfigPath() {
   try {
@@ -329,6 +391,47 @@ ipcMain.handle('md:import', async (_e, a = {}) => {
 ipcMain.handle('backup:list', (_e, a = {}) => listBackups(dataRoots, a && a.projectId));
 ipcMain.handle('backup:restore', (_e, a = {}) => respond('restoreBackup', restoreBackup(dataRoots, a.projectId, a.ts)));
 
+/* -------- in-app GitHub connection (token, no gh CLI) -------------------- */
+
+ipcMain.handle('github:tokenUrl', () => github.TOKEN_URL);
+ipcMain.handle('github:openTokenPage', async () => {
+  try {
+    await shell.openExternal(github.TOKEN_URL);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+});
+ipcMain.handle('github:status', () => {
+  const store = getGithubStore();
+  const token = store.read();
+  if (!token) return { ok: true, connected: false, encrypted: store.encryptionAvailable() };
+  const acc = loadGithubAccount() || {};
+  return {
+    ok: true,
+    connected: true,
+    login: acc.login || null,
+    avatarUrl: acc.avatarUrl || null,
+    encrypted: store.encryptionAvailable(),
+  };
+});
+// Validate → store encrypted. The token is never returned to the renderer/logged.
+ipcMain.handle('github:connect', async (_e, a = {}) => {
+  const token = String(a && a.token != null ? a.token : '').trim();
+  if (!token) return { ok: false, code: 'no_token', error: '請貼上 GitHub token' };
+  const u = await github.getUser({ token });
+  if (!u.ok) return { ok: false, code: u.code, error: u.error };
+  const w = getGithubStore().write(token);
+  if (!w.ok) return { ok: false, code: 'store_failed', error: w.error };
+  saveGithubAccount({ login: u.login, id: u.id, name: u.name, avatarUrl: u.avatarUrl });
+  return { ok: true, login: u.login, avatarUrl: u.avatarUrl, encrypted: w.encrypted };
+});
+ipcMain.handle('github:disconnect', () => {
+  getGithubStore().clear();
+  clearGithubAccount();
+  return { ok: true };
+});
+
 /* -------- team sync: git layer ------------------------------------------- */
 
 // Read-only status: never broadcasts (polling status must not clobber UI).
@@ -336,35 +439,41 @@ ipcMain.handle('git:status', (_e, a = {}) => gitStatus(dataRoots, a.projectId));
 ipcMain.handle('git:readBinding', (_e, a = {}) => readBinding(dataRoots, a.projectId));
 
 ipcMain.handle('git:pull', async (_e, a = {}) => {
-  const r = await gitPull(dataRoots, a.projectId);
+  const { token } = authContext();
+  const r = await gitPull(dataRoots, a.projectId, { token });
   if (r.ok) broadcast('git');
   else console.warn('[project-console] gitPull failed:', r.error);
   return r;
 });
 ipcMain.handle('git:commit', async (_e, a = {}) => {
-  const r = await gitCommit(dataRoots, a.projectId, a.message, a.opts);
+  const { account } = authContext();
+  const r = await gitCommit(dataRoots, a.projectId, a.message, { ...(a.opts || {}), account });
   if (r.ok) broadcast('git');
   return r;
 });
 ipcMain.handle('git:push', async (_e, a = {}) => {
-  const r = await gitPush(dataRoots, a.projectId);
+  const { token } = authContext();
+  const r = await gitPush(dataRoots, a.projectId, { token });
   if (r.ok) broadcast('git');
   else console.warn('[project-console] gitPush failed:', r.error);
   return r;
 });
 ipcMain.handle('git:init', async (_e, a = {}) => {
-  const r = await gitInit(dataRoots, a.projectId, a.opts);
+  const { account } = authContext();
+  const r = await gitInit(dataRoots, a.projectId, { ...(a.opts || {}), account });
   if (r.ok) broadcast('git');
   return r;
 });
 ipcMain.handle('git:bind', async (_e, a = {}) => {
-  const r = await gitBind(dataRoots, a.projectId, a.remote, a.opts);
+  const { account } = authContext();
+  const r = await gitBind(dataRoots, a.projectId, a.remote, { ...(a.opts || {}), account });
   if (r.ok) broadcast('git');
   else console.warn('[project-console] gitBind failed:', r.error);
   return r;
 });
 ipcMain.handle('git:sync', async (_e, a = {}) => {
-  const r = await gitx.syncProject(dataRoots, a.projectId, a.opts || {});
+  const { token, account } = authContext();
+  const r = await gitx.syncProject(dataRoots, a.projectId, { ...(a.opts || {}), token, account });
   if (r.ok) broadcast('git');
   else if (!r.needsResolution) console.warn('[project-console] gitSync failed:', r.error);
   return r;
@@ -372,16 +481,24 @@ ipcMain.handle('git:sync', async (_e, a = {}) => {
 
 /* -------- P3: share & permissions ---------------------------------------- */
 
-ipcMain.handle('share:info', (_e, a = {}) => gitx.shareInfo(dataRoots, a.projectId));
-ipcMain.handle('share:access', (_e, a = {}) => gitx.checkAccess(dataRoots, a.projectId));
+ipcMain.handle('share:info', (_e, a = {}) => {
+  const { token, account } = authContext();
+  return gitx.shareInfo(dataRoots, a.projectId, { token, account });
+});
+ipcMain.handle('share:access', (_e, a = {}) => {
+  const { token } = authContext();
+  return gitx.checkAccess(dataRoots, a.projectId, { token });
+});
 ipcMain.handle('share:invite', async (_e, a = {}) => {
-  const r = await gitx.inviteCollaborator(dataRoots, a.projectId, a.user, a.permission);
+  const { token } = authContext();
+  const r = await gitx.inviteCollaborator(dataRoots, a.projectId, a.user, a.permission, { token });
   if (r.ok) broadcast('share');
   else console.warn('[project-console] invite failed:', r.error);
   return r;
 });
 ipcMain.handle('share:remove', async (_e, a = {}) => {
-  const r = await gitx.removeCollaborator(dataRoots, a.projectId, a.user);
+  const { token } = authContext();
+  const r = await gitx.removeCollaborator(dataRoots, a.projectId, a.user, { token });
   if (r.ok) broadcast('share');
   else console.warn('[project-console] remove failed:', r.error);
   return r;
@@ -400,7 +517,10 @@ ipcMain.handle('history:restore', async (_e, a = {}) => {
 
 /* -------- P5: identity / my-day ------------------------------------------ */
 
-ipcMain.handle('app:identity', () => gitx.identity());
+ipcMain.handle('app:identity', () => {
+  const { account } = authContext();
+  return gitx.identity({ account });
+});
 ipcMain.handle('myday:collect', (_e, a = {}) => {
   const payload = scanRoots(dataRoots);
   return gitx.collectMyTasks(payload.projects, (a && a.who) || '', a && a.today);
@@ -409,12 +529,14 @@ ipcMain.handle('myday:collect', (_e, a = {}) => {
 /* -------- P6: merge / conflict ------------------------------------------- */
 
 ipcMain.handle('git:integrate', async (_e, a = {}) => {
-  const r = await gitx.integrateRemote(dataRoots, a.projectId, {});
+  const { token, account } = authContext();
+  const r = await gitx.integrateRemote(dataRoots, a.projectId, { token, account });
   if (r.ok && !r.needsResolution) broadcast('git');
   return r;
 });
 ipcMain.handle('git:resolve', async (_e, a = {}) => {
-  const r = await gitx.resolveMerge(dataRoots, a.projectId, a.choices);
+  const { token, account } = authContext();
+  const r = await gitx.resolveMerge(dataRoots, a.projectId, a.choices, { token, account });
   if (r.ok) broadcast('git');
   else console.warn('[project-console] resolve failed:', r.error);
   return r;
@@ -423,9 +545,19 @@ ipcMain.handle('git:resolve', async (_e, a = {}) => {
 /* -------- one-click publish to GitHub ------------------------------------ */
 
 ipcMain.handle('publish:project', async (_e, a = {}) => {
-  const r = await gitx.publishProject(dataRoots, a.projectId, a.opts || {});
+  const { token, account } = authContext();
+  const r = await gitx.publishProject(dataRoots, a.projectId, { ...(a.opts || {}), token, account });
   if (r.ok) broadcast('git');
   else console.warn('[project-console] publish failed:', r.code || r.error);
+  return r;
+});
+
+/* -------- git identity (so commits never hard-fail) ---------------------- */
+
+ipcMain.handle('identity:get', (_e, a = {}) => gitIdentityInfo(dataRoots, a.projectId));
+ipcMain.handle('identity:set', async (_e, a = {}) => {
+  const r = await setGitIdentity(dataRoots, a.projectId, a.name, a.email);
+  if (r.ok) broadcast('git');
   return r;
 });
 
@@ -443,7 +575,8 @@ ipcMain.handle('git:clone', async (_e, a = {}) => {
     if (!name || name === '.' || name === '..') return { ok: false, error: 'cannot derive a project name from the url' };
     dest = path.join(os.homedir(), 'ProjectConsole', name);
   }
-  const r = await gitClone(v.url, dest);
+  const { token } = authContext();
+  const r = await gitClone(v.url, dest, { token });
   if (r.ok && r.dir) {
     addRoot(path.dirname(r.dir));
     broadcast('git');

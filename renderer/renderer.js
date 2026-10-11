@@ -100,7 +100,16 @@ const state = {
   publishResult: null, // success payload after a publish
   publishError: null,
   publishDraft: null, // {name, owner, visibility, description} — survives re-renders
+  // git identity ("設定 git 身份")
+  identityForm: false,
+  identityCur: null, // {name, email, source} currently loaded
+  identityBusy: false,
+  identityWarn: {}, // projectId -> true when the last commit used a fallback identity
+  // In-app GitHub connection (stored token, no gh CLI needed).
+  github: { connected: false, login: null, avatarUrl: null, encrypted: false, open: false, busy: false, error: null },
 };
+
+const NO_GITHUB_MSG = '請喺 app 內『連接 GitHub』（一個 link + 貼 token），或者裝 `gh` CLI';
 
 const RAG_RANK = { red: 3, amber: 2, green: 1, grey: 0 };
 const ACCENTS = [null, '#dc3b1e', '#2f7a57', '#2f6fb5', '#a9821f', '#7a4fb5', '#5b5b5b'];
@@ -371,9 +380,7 @@ function render() {
   renderTopbar();
   renderCtx();
   renderTaskPanel(project);
-  try {
-    window.__pcState = state;
-  } catch (_) {}
+  renderGitHubPanel();
 }
 
 function renderTopbar() {
@@ -387,6 +394,13 @@ function renderTopbar() {
   if (rb) rb.classList.toggle('is-on', !state.selectedProjectId && state.topView === 'roadmap');
   const mb = document.getElementById('myday-btn');
   if (mb) mb.classList.toggle('is-on', !state.selectedProjectId && state.topView === 'myday');
+  const chip = document.getElementById('gh-chip');
+  if (chip) {
+    const g = state.github;
+    chip.textContent = g.connected ? '已連接 @' + (g.login || '?') : '未連接';
+    chip.classList.toggle('is-on', !!g.connected);
+    chip.classList.toggle('is-off', !g.connected);
+  }
 }
 
 function renderToolbar() {
@@ -537,6 +551,7 @@ function renderDashboard() {
       </div>
     </div>
     ${state.gitCloneOpen ? renderGitClonePanel() : ''}
+    ${renderGitHubBanner()}
     <div class="dash__stats">
       ${dstat('專案', all.length)}
       ${dstat('未完成', open)}
@@ -751,6 +766,8 @@ function renderProject(p) {
       ${state.menuOpen ? renderOverflowMenu(p) : ''}
       ${state.gitBindOpen ? renderGitBindForm() : ''}
       ${state.publishOpen ? renderPublishForm(p) : ''}
+      ${state.identityForm ? renderIdentityForm(p) : ''}
+      ${state.identityWarn[p.id] ? renderIdentityWarn(p) : ''}
       ${state.shareOpen ? renderSharePanel(p) : ''}
       ${state.conflicts ? renderConflictPanel(p) : ''}
       ${ro ? readonlyBanner() : ''}
@@ -777,6 +794,7 @@ function renderOverflowMenu(p) {
     <button class="btn btn--ghost" type="button" data-io="read" title="由 tasks.md 讀回打勾 (Obsidian)">由 tasks.md 讀回</button>
     <button class="btn btn--ghost" type="button" data-io="import" title="匯入 Markdown checklist (import)">匯入清單…</button>
     <button class="btn btn--ghost" type="button" data-freeze-baseline title="凍結基準線 (freeze baseline)">凍結基準線</button>
+    <button class="btn btn--ghost" type="button" data-identity-toggle title="設定 commit 用嘅 git 身份（user.name / user.email）">設定 git 身份</button>
     <button class="btn btn--ghost${state.showBackups ? ' is-on' : ''}" type="button" data-show-backups title="備份清單 / 還原 (backups)">備份清單</button>
     ${slipSummary(p)}
   </div>`;
@@ -841,6 +859,55 @@ function renderGitClonePanel() {
   </div>`;
 }
 
+/* ------------------------------ in-app GitHub connection ----------------- */
+
+/** Dashboard banner prompting the connection when not connected. */
+function renderGitHubBanner() {
+  if (state.github.connected) return '';
+  return `<div class="ghbanner">
+    <span class="ghbanner__text"><b>未連接 GitHub。</b>連接之後，發佈 repo、邀請隊友、clone 私有 repo、commit 身份全部唔使裝 <code>gh</code> CLI。</span>
+    <button class="btn" type="button" data-gh-open>連接 GitHub</button>
+  </div>`;
+}
+
+/** The 「連接 GitHub」panel (link + paste-token) shown from the topbar. */
+function renderGitHubPanel() {
+  const host = document.getElementById('github-panel');
+  if (!host) return;
+  const g = state.github;
+  host.hidden = !g.open;
+  if (!g.open) {
+    host.innerHTML = '';
+    return;
+  }
+  const bar = `<div class="panelbar"><span class="kicker">連接 GitHub</span><span class="panelbar__spacer"></span>
+      <button class="btn btn--ghost" type="button" data-gh-close>關閉</button></div>`;
+  let body;
+  if (g.connected) {
+    const avatar = g.avatarUrl
+      ? `<img class="ghavatar" src="${esc(g.avatarUrl)}" alt="">`
+      : `<span class="ghavatar" aria-hidden="true"></span>`;
+    body = `<div class="ghacct">
+      ${avatar}
+      <span class="ghacct__meta">
+        <span class="ghacct__login" data-gh-login>已連接 @${esc(g.login || '?')}</span>
+        <span class="ghacct__note">token ${g.encrypted ? '已加密儲存' : '以本機 0600 檔案儲存'} · 唔會傳返去介面</span>
+      </span>
+    </div>
+    <div class="pubops"><button class="btn btn--ghost" type="button" data-gh-disconnect${g.busy ? ' disabled' : ''}>斷開連接</button></div>`;
+  } else {
+    body = `<p class="note">用一個 GitHub token 連接，之後發佈 repo、邀請協作者、clone 私有 repo、commit 身份都唔使 <code>gh</code> CLI。撳下面個掣開 GitHub token 頁（scopes 已預填 <code>repo, read:user</code>），建立之後 copy 貼返落嚟。</p>
+    <div class="ghsteps">
+      <button class="btn" type="button" data-gh-open-token>① 開啟 GitHub token 頁</button>
+      <div class="pubrow"><span class="kicker">token</span>
+        <input class="fin fin--wide" type="password" data-gh-token placeholder="貼上 ghp_… / github_pat_…" autocomplete="off" spellcheck="false"></div>
+      ${g.error ? `<div class="note note--alert">${esc(g.error)}</div>` : ''}
+      <div class="pubops"><button class="btn" type="button" data-gh-connect${g.busy ? ' disabled' : ''}>${g.busy ? '連接中…' : '連接'}</button></div>
+    </div>`;
+  }
+  host.innerHTML = `<div class="ghpanel__box" role="dialog" aria-label="連接 GitHub">${bar}<div class="ghpanel__body">${body}</div></div>`;
+}
+
 /* ------------------------------ publish to GitHub ------------------------ */
 
 function slugify(s) {
@@ -887,6 +954,33 @@ function renderPublishForm(p) {
   </div>`;
 }
 
+/* ------------------------------ git identity ----------------------------- */
+
+function renderIdentityForm(p) {
+  const cur = state.identityCur || {};
+  const src =
+    cur.source === 'github'
+      ? '（自動由已連接 GitHub 帳號推導）'
+      : cur.source === 'gh'
+        ? '（自動由 gh 推導）'
+        : cur.source === 'existing'
+          ? '（現有設定）'
+          : '';
+  return `<div class="idform">
+    <div class="panelbar"><span class="kicker">設定 git 身份</span><span class="panelbar__spacer"></span>
+      <button class="btn btn--ghost" type="button" data-identity-cancel>取消</button></div>
+    <div class="note">commit 需要 user.name / user.email。只會寫入呢個專案（repo-local）${esc(src)}，唔會改你部機嘅全域 git 設定。</div>
+    <div class="pubrow"><span class="kicker">名</span><input class="fin" type="text" data-id-name value="${esc(cur.name || '')}" placeholder="例如 Jack 或 TMCYX"></div>
+    <div class="pubrow"><span class="kicker">email</span><input class="fin fin--wide" type="text" data-id-email value="${esc(cur.email || '')}" placeholder="you@example.com 或 GitHub noreply"></div>
+    <div class="pubops"><button class="btn" type="button" data-identity-save${state.identityBusy ? ' disabled' : ''}>${state.identityBusy ? '儲存中…' : '儲存'}</button></div>
+  </div>`;
+}
+
+function renderIdentityWarn(p) {
+  return `<div class="idwarn">未設定 git 身份，上次 commit 用咗臨時身份（作者 = Project Console）。
+    <button class="btn btn--ghost" type="button" data-identity-toggle>設定 git 身份</button></div>`;
+}
+
 /* ------------------------------ P3: share panel -------------------------- */
 
 function readonlyChipHtml(pid) {
@@ -913,8 +1007,8 @@ function renderSharePanel(p) {
   } else if (!sh.ok) {
     const remote = sh.remote ? `<div class="shline"><span class="id">remote</span><span class="mono">${esc(sh.remote)}</span></div>` : '';
     let hint = esc(sh.error || '未知錯誤');
-    if (sh.code === 'gh_missing') hint = '未安裝 gh CLI。安裝：<code>winget install GitHub.cli</code>';
-    if (sh.code === 'gh_not_authed') hint = 'gh 未登入。請先執行：<code>gh auth login</code>（只有 repo owner / admin 先 invite 到人）';
+    if (sh.code === 'gh_missing') hint = '請喺 app 內『連接 GitHub』（一個 link + 貼 token），或者裝 <code>gh</code> CLI';
+    if (sh.code === 'gh_not_authed') hint = 'gh 未登入。請先執行：<code>gh auth login</code>，或者喺 app 內『連接 GitHub』貼 token';
     if (sh.code === 'no_remote') hint = '呢個專案未綁定 git remote。先撳上面「Git…」綁定一個 GitHub repo。';
     if (sh.code === 'not_github') hint = 'remote 唔係 GitHub repo（Share 只支援 GitHub）。';
     body = `${remote}<div class="note note--alert">${hint}</div>`;
@@ -3510,6 +3604,10 @@ async function doSync() {
       if (r.pushed) bits.push('已 push');
       else if (!r.committed) bits.push('無新改動');
       toast('Sync 完成 · ' + bits.join(' · '));
+      if (r.needIdentitySetup) {
+        state.identityWarn[p.id] = true;
+        toast(r.identityWarning || '未設定 git 身份，已用臨時身份 commit');
+      }
     } else {
       toast(syncErrorMsg(r));
     }
@@ -3617,9 +3715,9 @@ function publishErr(r) {
   if (!r) return 'unknown';
   switch (r.code) {
     case 'gh_missing':
-      return '未安裝 gh CLI（安裝：winget install GitHub.cli）';
+      return NO_GITHUB_MSG;
     case 'gh_not_authed':
-      return 'gh 未登入（請先執行 gh auth login）';
+      return '未登入 GitHub — 請喺 app 內『連接 GitHub』貼 token，或執行 gh auth login';
     case 'bad_name':
     case 'bad_owner':
     case 'repo_exists':
@@ -3634,9 +3732,6 @@ function publishErr(r) {
 async function doPublish() {
   const p = currentProject();
   if (!p) return;
-  try {
-    window.__pcPub = { phase: 'enter', pid: p.id };
-  } catch (_) {}
   const draft = state.publishDraft || {};
   const name = String(draft.name != null ? draft.name : ((document.querySelector('[data-pub-name]') || {}).value || '')).trim();
   const owner = String(draft.owner != null ? draft.owner : ((document.querySelector('[data-pub-owner]') || {}).value || '')).trim();
@@ -3649,11 +3744,9 @@ async function doPublish() {
   render();
   try {
     const r = await window.api.publishProject(p.id, { name, owner, visibility, description: desc, rebind });
-    try {
-      window.__pcPub = { name, owner, visibility, rebind, r };
-    } catch (_) {}
     if (r && r.ok) {
       state.publishResult = r;
+      if (r.needIdentitySetup) state.identityWarn[p.id] = true;
       toast('已發佈：' + (r.url || ''));
       const pl = await window.api.refresh();
       applyPayload(pl);
@@ -3673,8 +3766,10 @@ async function doPublish() {
 
 function shareErrMsg(r) {
   if (!r) return '失敗：unknown';
-  if (r.code === 'gh_missing') return '未安裝 gh CLI（winget install GitHub.cli）';
-  if (r.code === 'gh_not_authed') return 'gh 未登入（請先 gh auth login）';
+  if (r.code === 'gh_missing') return NO_GITHUB_MSG;
+  if (r.code === 'gh_not_authed') return '未登入 GitHub — 請喺 app 內『連接 GitHub』貼 token，或執行 gh auth login';
+  if (r.code === 'bad_token') return 'GitHub token 無效或已失效 — 請重新「連接 GitHub」';
+  if (r.code === 'forbidden') return '權限不足 — 只有 repo owner / admin 先 invite 到人';
   if (r.code === 'no_admin') return '冇 admin 權限（只有 repo owner / admin 先 invite 到）';
   return '失敗：' + (r.error || r.code || '');
 }
@@ -3847,6 +3942,101 @@ async function loadIdentity() {
   if (state.topView === 'myday') loadMyDay();
 }
 
+/* ------------------------------ in-app GitHub actions -------------------- */
+
+async function loadGitHub() {
+  try {
+    const r = await window.api.githubStatus();
+    if (r && r.ok) {
+      state.github.connected = !!r.connected;
+      state.github.login = r.login || null;
+      state.github.avatarUrl = r.avatarUrl || null;
+      state.github.encrypted = !!r.encrypted;
+    }
+  } catch (_) {
+    /* the connection is optional */
+  }
+}
+
+function toggleGitHub() {
+  state.github.open = !state.github.open;
+  state.github.error = null;
+  render();
+}
+
+function githubErrMsg(r) {
+  if (!r) return '連接失敗';
+  if (r.code === 'bad_token') return 'token 無效或已失效，請建立一個新 token 再試';
+  if (r.code === 'network') return '連唔到 GitHub（網絡問題）— 檢查網絡後再試';
+  if (r.code === 'no_token') return '請貼上 GitHub token';
+  return r.error || '連接失敗';
+}
+
+async function doGitHubOpenToken() {
+  try {
+    const r = await window.api.githubOpenTokenPage();
+    if (r && r.ok === false) toast('開唔到瀏覽器：' + (r.error || ''));
+  } catch (err) {
+    toast('開唔到瀏覽器：' + err.message);
+  }
+}
+
+async function doGitHubConnect() {
+  const el = document.querySelector('[data-gh-token]');
+  const token = el ? el.value.trim() : '';
+  if (!token) {
+    toast('請貼上 GitHub token');
+    return;
+  }
+  state.github.busy = true;
+  state.github.error = null;
+  render();
+  try {
+    const r = await window.api.githubConnect(token);
+    if (r && r.ok) {
+      state.github.connected = true;
+      state.github.login = r.login || null;
+      state.github.avatarUrl = r.avatarUrl || null;
+      state.github.encrypted = !!r.encrypted;
+      state.github.error = null;
+      toast('已連接 GitHub @' + (r.login || ''));
+      loadIdentity(); // refresh publish default owner / my-day default
+    } else {
+      state.github.error = githubErrMsg(r);
+      toast('連接失敗：' + state.github.error);
+    }
+  } catch (err) {
+    state.github.error = err.message;
+    toast('連接失敗：' + err.message);
+  } finally {
+    state.github.busy = false;
+    // Clear any pasted token from the DOM before the next render.
+    const inp = document.querySelector('[data-gh-token]');
+    if (inp) inp.value = '';
+    render();
+  }
+}
+
+async function doGitHubDisconnect() {
+  const go = await confirmDialog('斷開 GitHub 連接？（本機儲存嘅 token 會被刪除）');
+  if (!go) return;
+  try {
+    const r = await window.api.githubDisconnect();
+    if (r && r.ok) {
+      state.github.connected = false;
+      state.github.login = null;
+      state.github.avatarUrl = null;
+      state.github.encrypted = false;
+      toast('已斷開 GitHub 連接');
+    } else {
+      toast('斷開失敗');
+    }
+  } catch (err) {
+    toast('斷開失敗：' + err.message);
+  }
+  render();
+}
+
 /* ------------------------------ P6: conflict actions --------------------- */
 
 function setAllConflicts(choice) {
@@ -3881,6 +4071,46 @@ async function doResolveConflicts() {
     toast('合併失敗：' + err.message);
   } finally {
     state.conflictBusy = false;
+    render();
+  }
+}
+
+async function toggleIdentity() {
+  const p = currentProject();
+  if (!p) return;
+  state.identityForm = !state.identityForm;
+  state.menuOpen = false;
+  if (state.identityForm) {
+    try {
+      const r = await window.api.identityGet(p.id);
+      state.identityCur = r && r.ok ? { name: r.name, email: r.email, source: r.source } : {};
+    } catch (_) {
+      state.identityCur = {};
+    }
+  }
+  render();
+}
+
+async function doIdentitySave() {
+  const p = currentProject();
+  if (!p) return;
+  const name = ((document.querySelector('[data-id-name]') || {}).value || '').trim();
+  const email = ((document.querySelector('[data-id-email]') || {}).value || '').trim();
+  state.identityBusy = true;
+  render();
+  try {
+    const r = await window.api.identitySet(p.id, name, email);
+    if (r && r.ok) {
+      toast('已設定 git 身份：' + name);
+      state.identityForm = false;
+      delete state.identityWarn[p.id];
+    } else {
+      toast('設定失敗：' + ((r && r.error) || ''));
+    }
+  } catch (err) {
+    toast('設定失敗：' + err.message);
+  } finally {
+    state.identityBusy = false;
     render();
   }
 }
@@ -4088,6 +4318,7 @@ function selectProject(id) {
   state.publishResult = null;
   state.publishError = null;
   state.publishDraft = null;
+  state.identityForm = false;
   state.history = [];
   state.selectedCommit = null;
   state.diff = null;
@@ -4114,6 +4345,24 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (e.target.closest('#help-btn')) return openGuide();
+  // In-app GitHub connection panel.
+  if (e.target.closest('#github-btn')) return toggleGitHub();
+  if (e.target.closest('[data-gh-open]')) {
+    state.github.open = true;
+    state.github.error = null;
+    return render();
+  }
+  if (state.github.open) {
+    const panel = document.getElementById('github-panel');
+    if (e.target.closest('[data-gh-close]') || e.target === panel) {
+      state.github.open = false;
+      return render();
+    }
+    if (e.target.closest('[data-gh-open-token]')) return doGitHubOpenToken();
+    if (e.target.closest('[data-gh-connect]')) return doGitHubConnect();
+    if (e.target.closest('[data-gh-disconnect]')) return doGitHubDisconnect();
+    if (panel && panel.contains(e.target)) return; // inner clicks stay in the panel
+  }
   if (state.guideOpen) {
     // The guide overlay owns every click while it is open.
     if (e.target.closest('#guide-close') || e.target.id === 'guide') return closeGuide();
@@ -4223,6 +4472,14 @@ document.addEventListener('click', (e) => {
     state.publishResult = null;
     state.publishError = null;
     state.publishDraft = null;
+    render();
+    return;
+  }
+  // git identity
+  if (e.target.closest('[data-identity-toggle]')) return toggleIdentity();
+  if (e.target.closest('[data-identity-save]')) return doIdentitySave();
+  if (e.target.closest('[data-identity-cancel]')) {
+    state.identityForm = false;
     render();
     return;
   }
@@ -4736,6 +4993,7 @@ async function init() {
     if (l) l.innerHTML = '<div class="empty">讀取失敗: ' + esc(err.message) + '</div>';
   }
   loadIdentity();
+  loadGitHub().then(() => render());
 }
 
 init();

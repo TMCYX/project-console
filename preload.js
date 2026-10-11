@@ -67,6 +67,15 @@ contextBridge.exposeInMainWorld('api', {
   gitResolve: (projectId, choices) => ipcRenderer.invoke('git:resolve', { projectId, choices }),
   // publish to GitHub (one-click)
   publishProject: (projectId, opts) => ipcRenderer.invoke('publish:project', { projectId, opts }),
+  // git identity
+  identityGet: (projectId) => ipcRenderer.invoke('identity:get', { projectId }),
+  identitySet: (projectId, name, email) => ipcRenderer.invoke('identity:set', { projectId, name, email }),
+  // in-app GitHub connection (token-based, no gh CLI needed)
+  githubTokenUrl: () => ipcRenderer.invoke('github:tokenUrl'),
+  githubOpenTokenPage: () => ipcRenderer.invoke('github:openTokenPage'),
+  githubStatus: () => ipcRenderer.invoke('github:status'),
+  githubConnect: (token) => ipcRenderer.invoke('github:connect', { token }),
+  githubDisconnect: () => ipcRenderer.invoke('github:disconnect'),
   onUpdate: (cb) => {
     const handler = (_event, payload) => cb(payload);
     ipcRenderer.on('projects:update', handler);

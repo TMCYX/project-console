@@ -18,9 +18,13 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const data = require('./data');
+const github = require('./github');
+const { ensureGitIdentity, identityArgs } = require('./git-identity');
 
 const {
   runGit,
+  resolveGitNetwork,
+  friendlyGitError,
   projectDirOrError,
   readJsonSafe,
   atomicWriteJson,
@@ -40,6 +44,9 @@ const {
 
 const GIT_TIMEOUT_MS = 30000;
 const GH_TIMEOUT_MS = 25000;
+
+/** Shown when the user has neither an in-app token nor a working gh CLI. */
+const NO_AUTH_MSG = github.NO_AUTH_MSG;
 
 /* ============================ small helpers ============================== */
 
@@ -143,24 +150,26 @@ function classifyGhError(text) {
   return 'gh_error';
 }
 
-/** Is gh installed / authenticated? Never throws. */
-async function ghAvailable() {
-  const v = await runGh(['--version']);
+/** Is gh installed / authenticated? Never throws. `runner` is injectable (tests). */
+async function ghAvailable(runner) {
+  const run = typeof runner === 'function' ? runner : runGh;
+  const v = await run(['--version']);
   if (!v.ok) return { installed: false, authed: false, login: null, error: v.stderr.trim() || 'gh not available' };
-  const u = await runGh(['api', 'user', '--jq', '.login']);
+  const u = await run(['api', 'user', '--jq', '.login']);
   if (u.ok && u.stdout.trim()) return { installed: true, authed: true, login: u.stdout.trim(), error: null };
   return { installed: true, authed: false, login: null, error: 'gh 未登入（gh auth login）' };
 }
 
-/** Run a gh api call and parse the JSON body. */
-async function ghApi(endpoint, opts) {
+/** Run a gh api call and parse the JSON body. `runner` is injectable (tests). */
+async function ghApi(endpoint, opts, runner) {
+  const run = typeof runner === 'function' ? runner : runGh;
   const args = ['api'];
   if (opts && opts.method && opts.method !== 'GET') args.push('-X', opts.method);
   args.push(endpoint);
   if (opts && opts.fields) {
     for (const [k, val] of Object.entries(opts.fields)) args.push('-f', `${k}=${val}`);
   }
-  const res = await runGh(args);
+  const res = await run(args);
   if (!res.ok) {
     const err = (res.stderr || res.stdout || 'gh api failed').trim();
     return { ok: false, code: classifyGhError(err), error: err, stderr: res.stderr.trim(), timedOut: res.timedOut };
@@ -189,8 +198,11 @@ async function repoCoords(root, projectId) {
   return { dir: r.dir, isRepo: !!(st && st.isRepo), remote, repo: parseRemote(remote), binding: bind.ok ? bind.binding : null };
 }
 
-/** Read-only detection: gh repo permission first, else a dry-run push. */
-async function checkAccess(root, projectId) {
+/**
+ * Read-only detection. Token first (REST permissions), else gh, else a dry-run
+ * push. opts: { token, fetch, runGh }.
+ */
+async function checkAccess(root, projectId, opts = {}) {
   const c = await repoCoords(root, projectId);
   if (c.error) return { ok: false, error: c.error };
   if (!c.isRepo) return { ok: true, readOnly: false, permission: null, source: 'no_repo' };
@@ -202,9 +214,15 @@ async function checkAccess(root, projectId) {
     }
     return { ok: true, readOnly: false, permission: null, source: 'not_github' };
   }
-  const gh = await ghAvailable();
+  if (opts.token) {
+    const perms = await github.repoPermissions(c.repo, { token: opts.token, fetch: opts.fetch });
+    if (perms.ok) return { ok: true, readOnly: perms.readOnly, permission: perms.permission, source: 'token' };
+    // Bad token → surface it rather than silently falling back.
+    if (perms.code === 'bad_token') return { ok: true, readOnly: true, permission: null, source: 'token_error', error: perms.error };
+  }
+  const gh = await ghAvailable(opts.runGh);
   if (gh.installed && gh.authed) {
-    const info = await ghApi(`repos/${c.repo.owner}/${c.repo.name}`);
+    const info = await ghApi(`repos/${c.repo.owner}/${c.repo.name}`, null, opts.runGh);
     if (info.ok && info.value) {
       const perm = permOf(info.value.permissions);
       return { ok: true, readOnly: perm === 'READ', permission: perm, source: 'gh' };
@@ -217,15 +235,49 @@ async function checkAccess(root, projectId) {
   return { ok: true, readOnly: false, permission: null, source: 'unknown' };
 }
 
+/** Share panel data via the GitHub REST API + stored token. */
+async function shareInfoViaToken(repo, opts) {
+  const apiOpts = { token: opts.token, fetch: opts.fetch };
+  const perms = await github.repoPermissions(repo, apiOpts);
+  if (!perms.ok) return perms;
+  const cols = await github.listCollaborators(repo, apiOpts);
+  const invs = await github.listInvitations(repo, apiOpts);
+  const warnings = [];
+  if (!cols.ok) warnings.push('collaborators: ' + cols.error);
+  if (!invs.ok) warnings.push('invitations: ' + invs.error);
+  const perm = perms.permission;
+  const { owner, name } = github.splitRepo(repo);
+  return {
+    ok: true,
+    me: (opts.account && opts.account.login) || null,
+    repo: {
+      owner,
+      name,
+      full: perms.fullName,
+      url: perms.htmlUrl,
+      private: perms.private,
+      defaultBranch: perms.defaultBranch,
+    },
+    permission: perm,
+    permissionLabel: permLabel(perm),
+    readOnly: perms.readOnly,
+    permissionSource: 'token',
+    collaborators: cols.ok ? cols.collaborators : [],
+    invites: invs.ok ? invs.invites : [],
+    warnings,
+  };
+}
+
 /**
- * Share panel data. Degrades gracefully: returns a structured { ok:false, code }
- * for no-remote / not-github / gh-missing / gh-not-authed, always with the
- * repo/remote/access context attached so the UI can explain exactly what's needed.
+ * Share panel data. Prefers the stored token (REST) and falls back to the gh
+ * CLI when no token is present. Degrades gracefully with a structured
+ * { ok:false, code } for no-remote / not-github / no-auth, always with the
+ * repo/remote/access context attached so the UI can explain what's needed.
  */
-async function shareInfo(root, projectId) {
+async function shareInfo(root, projectId, opts = {}) {
   const c = await repoCoords(root, projectId);
   if (c.error) return { ok: false, code: 'no_project', error: c.error };
-  const access = await checkAccess(root, projectId);
+  const access = await checkAccess(root, projectId, opts);
   const ctx = {
     remote: c.remote,
     repo: c.repo ? { owner: c.repo.owner, name: c.repo.name, full: `${c.repo.owner}/${c.repo.name}` } : null,
@@ -236,17 +288,25 @@ async function shareInfo(root, projectId) {
   if (!c.remote) return { ok: false, code: 'no_remote', error: '呢個專案未綁定 git remote（先用「Git…」綁定）', ...ctx };
   if (!c.repo) return { ok: false, code: 'not_github', error: 'remote 唔係 GitHub repo（Share 只支援 GitHub）', ...ctx };
 
-  const gh = await ghAvailable();
-  if (!gh.installed) return { ok: false, code: 'gh_missing', error: '未安裝 gh CLI。安裝：winget install GitHub.cli', ...ctx, me: null };
-  if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login', ...ctx, me: null };
+  // 1. Stored token → REST API.
+  if (opts.token) {
+    const t = await shareInfoViaToken(c.repo, opts);
+    if (t.ok) return { ...t, remote: c.remote, ...ctx, repo: t.repo };
+    return { ok: false, code: t.code, error: t.error, ...ctx, me: (opts.account && opts.account.login) || null };
+  }
 
-  const info = await ghApi(`repos/${c.repo.owner}/${c.repo.name}`);
+  // 2. Fall back to the gh CLI.
+  const gh = await ghAvailable(opts.runGh);
+  if (!gh.installed) return { ok: false, code: 'gh_missing', error: NO_AUTH_MSG, ...ctx, me: null };
+  if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login，或喺 app 內『連接 GitHub』', ...ctx, me: null };
+
+  const info = await ghApi(`repos/${c.repo.owner}/${c.repo.name}`, null, opts.runGh);
   if (!info.ok) return { ok: false, code: info.code, error: info.error, ...ctx, me: gh.login };
 
   const value = info.value || {};
   const perm = permOf(value.permissions);
-  const cols = await ghApi(`repos/${c.repo.owner}/${c.repo.name}/collaborators`);
-  const invs = await ghApi(`repos/${c.repo.owner}/${c.repo.name}/invitations`);
+  const cols = await ghApi(`repos/${c.repo.owner}/${c.repo.name}/collaborators`, null, opts.runGh);
+  const invs = await ghApi(`repos/${c.repo.owner}/${c.repo.name}/invitations`, null, opts.runGh);
   const warnings = [];
   if (!cols.ok) warnings.push('collaborators: ' + cols.error);
   if (!invs.ok) warnings.push('invitations: ' + invs.error);
@@ -280,36 +340,46 @@ async function shareInfo(root, projectId) {
   };
 }
 
-/** Invite (or update) a collaborator. permission: 'write'|'push'|'read'. */
-async function inviteCollaborator(root, projectId, user, permission) {
+/** Invite (or update) a collaborator. permission: 'write'|'push'|'read'. Token-first. */
+async function inviteCollaborator(root, projectId, user, permission, opts = {}) {
   const u = String(user == null ? '' : user).trim();
   if (!u || /[\s/@:]/.test(u)) return { ok: false, code: 'bad_user', error: '請輸入有效嘅 GitHub username' };
   const c = await repoCoords(root, projectId);
   if (c.error) return { ok: false, error: c.error };
   if (!c.repo) return { ok: false, code: 'not_github', error: 'remote 唔係 GitHub repo' };
-  const gh = await ghAvailable();
-  if (!gh.installed) return { ok: false, code: 'gh_missing', error: '未安裝 gh CLI。安裝：winget install GitHub.cli' };
-  if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login' };
   const perm = permission === 'read' || permission === 'pull' ? 'pull' : 'push';
+  if (opts.token) {
+    const r = await github.addCollaborator(c.repo, u, perm, { token: opts.token, fetch: opts.fetch });
+    if (!r.ok) return { ok: false, code: r.code, error: r.error };
+    return { ok: true, user: u, permission: perm };
+  }
+  const gh = await ghAvailable(opts.runGh);
+  if (!gh.installed) return { ok: false, code: 'gh_missing', error: NO_AUTH_MSG };
+  if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login' };
   const res = await ghApi(`repos/${c.repo.owner}/${c.repo.name}/collaborators/${u}`, {
     method: 'PUT',
     fields: { permission: perm },
-  });
+  }, opts.runGh);
   if (!res.ok) return { ok: false, code: res.code, error: res.error };
   return { ok: true, user: u, permission: perm };
 }
 
-/** Remove a collaborator. */
-async function removeCollaborator(root, projectId, user) {
+/** Remove a collaborator. Token-first. */
+async function removeCollaborator(root, projectId, user, opts = {}) {
   const u = String(user == null ? '' : user).trim();
   if (!u) return { ok: false, code: 'bad_user', error: '請輸入有效嘅 GitHub username' };
   const c = await repoCoords(root, projectId);
   if (c.error) return { ok: false, error: c.error };
   if (!c.repo) return { ok: false, code: 'not_github', error: 'remote 唔係 GitHub repo' };
-  const gh = await ghAvailable();
-  if (!gh.installed) return { ok: false, code: 'gh_missing', error: '未安裝 gh CLI。安裝：winget install GitHub.cli' };
+  if (opts.token) {
+    const r = await github.removeCollaborator(c.repo, u, { token: opts.token, fetch: opts.fetch });
+    if (!r.ok) return { ok: false, code: r.code, error: r.error };
+    return { ok: true, user: u };
+  }
+  const gh = await ghAvailable(opts.runGh);
+  if (!gh.installed) return { ok: false, code: 'gh_missing', error: NO_AUTH_MSG };
   if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login' };
-  const res = await ghApi(`repos/${c.repo.owner}/${c.repo.name}/collaborators/${u}`, { method: 'DELETE' });
+  const res = await ghApi(`repos/${c.repo.owner}/${c.repo.name}/collaborators/${u}`, { method: 'DELETE' }, opts.runGh);
   if (!res.ok) return { ok: false, code: res.code, error: res.error };
   return { ok: true, user: u };
 }
@@ -485,8 +555,8 @@ function collectMyTasks(projects, who, todayStr) {
   return out;
 }
 
-/** Best-effort identity: git user.name + the gh login (if authed). */
-async function identity() {
+/** Best-effort identity: git user.name + the connected GitHub login (token or gh). */
+async function identity(opts = {}) {
   let gitUser = null;
   try {
     const g = await runGit(['config', '--global', 'user.name'], process.cwd());
@@ -494,8 +564,12 @@ async function identity() {
   } catch (_) {
     /* optional */
   }
-  const gh = await ghAvailable();
-  return { ok: true, gitUser, ghLogin: gh.authed ? gh.login : null, ghInstalled: gh.installed };
+  const accountLogin = opts.account && opts.account.login ? String(opts.account.login) : null;
+  if (accountLogin) {
+    return { ok: true, gitUser, ghLogin: accountLogin, ghInstalled: true, githubConnected: true };
+  }
+  const gh = await ghAvailable(opts.runGh);
+  return { ok: true, gitUser, ghLogin: gh.authed ? gh.login : null, ghInstalled: gh.installed, githubConnected: false };
 }
 
 /* ============================ P6: field-level merge ===================== */
@@ -728,10 +802,16 @@ async function integrateRemote(root, projectId, opts) {
   if (!st.remote) return { ok: true, upToDate: true, reason: 'no_remote' };
   const branch = st.branch || (st.binding && st.binding.branch) || 'main';
 
-  const fetch = await runGit(['fetch', 'origin', branch], dir, GIT_TIMEOUT_MS);
+  const net = resolveGitNetwork('fetch', { remote: st.remote, token: opts && opts.token, branch, hasUpstream: st.hasUpstream });
+  const fetch = await runGit(net.args, dir, GIT_TIMEOUT_MS);
   if (!fetch.ok) {
     const code = /could not resolve host|network|unable to access|timed out|offline/i.test(fetch.stderr || '') ? 'offline' : 'fetch_failed';
-    return { ok: false, code, error: fetch.timedOut ? 'git fetch timed out' : (fetch.stderr || '').trim(), timedOut: fetch.timedOut };
+    return {
+      ok: false,
+      code,
+      error: fetch.timedOut ? 'git fetch timed out' : data.friendlyNetworkError('fetch', fetch),
+      timedOut: fetch.timedOut,
+    };
   }
   const remoteRef = `origin/${branch}`;
   const remoteShaRes = await runGit(['rev-parse', remoteRef], dir);
@@ -793,7 +873,8 @@ async function integrateRemote(root, projectId, opts) {
   const tree = await runGit(['write-tree'], dir);
   if (!tree.ok || !tree.stdout.trim()) return { ok: false, code: 'tree_failed', error: (tree.stderr || '').trim() };
   const mergeMsg = `merge: reconcile with ${branch} (auto field-level merge)`;
-  const ct = await runGit(['commit-tree', tree.stdout.trim(), '-p', head, '-p', remoteSha, '-m', mergeMsg], dir);
+  const id = await ensureGitIdentity(dir, { account: opts && opts.account });
+  const ct = await runGit([...identityArgs(id), 'commit-tree', tree.stdout.trim(), '-p', head, '-p', remoteSha, '-m', mergeMsg], dir);
   if (!ct.ok || !ct.stdout.trim()) return { ok: false, code: 'commit_failed', error: (ct.stderr || '').trim() };
   const newSha = ct.stdout.trim();
   const ur = await runGit(['update-ref', `refs/heads/${branch}`, newSha], dir);
@@ -805,13 +886,13 @@ async function integrateRemote(root, projectId, opts) {
 }
 
 /** Resolve conflicts with explicit choices and record the merge commit. */
-async function resolveMerge(root, projectId, choices) {
+async function resolveMerge(root, projectId, choices, opts = {}) {
   const map = {};
   for (const c of choices || []) {
     if (!c) continue;
     map[`${c.scope}:${c.id}:${c.field}`] = c.choice || 'ours';
   }
-  return integrateRemote(root, projectId, { choices: map });
+  return integrateRemote(root, projectId, { ...opts, choices: map });
 }
 
 /* ============================ P6: sync (commit → integrate → push) ====== */
@@ -825,20 +906,26 @@ async function syncProject(root, projectId, opts) {
   const steps = [];
   let committed = false;
   let message = null;
+  let identity = null;
+  let needIdentitySetup = false;
+  let identityWarning = null;
 
   // 1. Commit local changes first, so integration sees a clean tree.
   if (st0.dirty) {
     message = (opts && opts.message) || (await deriveCommitMessage(root, projectId));
-    const cr = await gitCommit(root, projectId, message, { author: opts && opts.author });
+    const cr = await gitCommit(root, projectId, message, { author: opts && opts.author, account: opts && opts.account });
     steps.push({ step: 'commit', ok: cr.ok, detail: cr.error || message });
-    if (!cr.ok) return { ok: false, phase: 'commit', error: cr.error, message, steps };
+    identity = cr.identity || null;
+    needIdentitySetup = !!cr.needIdentitySetup;
+    identityWarning = cr.warning || null;
+    if (!cr.ok) return { ok: false, phase: 'commit', error: cr.error, message, steps, identity, needIdentitySetup };
     committed = true;
   }
 
   // 2. Integrate the remote (ff or semantic merge).
   let integrated = { upToDate: true };
   if (st0.remote) {
-    integrated = await integrateRemote(root, projectId, {});
+    integrated = await integrateRemote(root, projectId, { token: opts && opts.token, account: opts && opts.account });
     steps.push({
       step: 'pull',
       ok: integrated.ok,
@@ -853,7 +940,7 @@ async function syncProject(root, projectId, opts) {
   // 3. Push.
   let pushed = false;
   if (st0.remote) {
-    const pr = await gitPush(root, projectId);
+    const pr = await gitPush(root, projectId, { token: opts && opts.token });
     steps.push({ step: 'push', ok: pr.ok, detail: pr.error || pr.stdout });
     if (!pr.ok) {
       const rejected = /rejected|non-fast-forward|fetch first|failed to push/i.test((pr.stderr || '') + (pr.error || ''));
@@ -862,7 +949,7 @@ async function syncProject(root, projectId, opts) {
     pushed = true;
   }
 
-  return { ok: true, message, committed, pulled: integrated.fastForwarded === true || integrated.merged === true, merged: integrated.merged === true, pushed, steps, status: await gitStatus(root, projectId) };
+  return { ok: true, message, committed, pulled: integrated.fastForwarded === true || integrated.merged === true, merged: integrated.merged === true, pushed, steps, identity, needIdentitySetup, identityWarning, status: await gitStatus(root, projectId) };
 }
 
 /* ============================ publish to GitHub ========================== */
@@ -950,9 +1037,92 @@ async function publishViaFallback(run, g, dir, plan) {
 }
 
 /**
+ * Publish via the stored GitHub token (no gh CLI): create the repo through the
+ * REST API, init + commit, set a CLEAN origin, push with a per-command authed
+ * URL (the token is never persisted into .git/config), then write the binding.
+ */
+async function publishViaToken(root, projectId, o) {
+  const dir = o.dir;
+  const g = o.g;
+  const account = o.account || null;
+  const login = account && account.login ? String(account.login) : '';
+  const owner = o.owner || login || '';
+  const steps = [];
+
+  // 1. Init the repo (with an initial commit + resolved identity).
+  let initialized = false;
+  let needIdentitySetup = false;
+  let identityWarning = null;
+  if (!(o.st && o.st.isRepo)) {
+    const ini = await gitInit(root, projectId, { branch: 'main', account, useGh: false });
+    if (!ini.ok) return { ok: false, code: 'init_failed', error: ini.error };
+    initialized = true;
+    needIdentitySetup = !!ini.needIdentitySetup;
+    identityWarning = ini.warning || null;
+  }
+  const head = await g(['rev-parse', '--verify', 'HEAD'], dir);
+  if (!head.ok) {
+    await g(['add', '-A'], dir, GIT_TIMEOUT_MS);
+    const id = await ensureGitIdentity(dir, { account, useGh: false });
+    const c = await g([...identityArgs(id), 'commit', '-m', 'chore: initial commit'], dir, GIT_TIMEOUT_MS);
+    if (!c.ok) return { ok: false, code: 'commit_failed', error: friendlyGitError(c.stderr) || 'commit failed' };
+    if (id.needSetup) {
+      needIdentitySetup = true;
+      identityWarning = id.warning || identityWarning;
+    }
+  }
+
+  // 2. Create the repo via the REST API.
+  const created = await github.createRepo(
+    o.name,
+    { private: o.visibility !== 'public', description: o.description },
+    { token: o.token, fetch: o.fetch, owner, login }
+  );
+  if (!created.ok) {
+    if (created.code === 'repo_exists') return { ok: false, code: 'repo_exists', error: created.error };
+    return { ok: false, code: created.code === 'network' ? 'offline' : created.code, error: created.error };
+  }
+  steps.push({ step: 'create', ok: true, detail: created.fullName });
+
+  const url = created.htmlUrl || `https://github.com/${created.fullName}`;
+
+  // 3. Set a CLEAN origin (no token) + write the binding.
+  await ensureOrigin(dir, url, g);
+  const wb = writeBinding(root, projectId, { remote: url, branch: 'main', projectId });
+  if (!wb.ok) return { ok: false, code: 'bind_failed', error: wb.error };
+
+  // 4. Push with a per-command authed URL (token never written to config).
+  const authed = github.authedRemoteUrl(url, o.token) || url;
+  const push = await g(['push', authed, 'main:main'], dir, GIT_TIMEOUT_MS);
+  steps.push({ step: 'push', ok: push.ok, detail: (push.stderr || '').trim() });
+  if (push.ok) {
+    await g(['config', 'branch.main.remote', 'origin'], dir);
+    await g(['config', 'branch.main.merge', 'refs/heads/main'], dir);
+  }
+
+  return {
+    ok: true,
+    initialized,
+    bound: true,
+    viaToken: true,
+    url,
+    repo: created.fullName,
+    visibility: o.visibility,
+    remote: url,
+    pushed: push.ok,
+    pushError: push.ok ? undefined : friendlyGitError(push.stderr) || (push.stderr || '').trim(),
+    steps,
+    needIdentitySetup,
+    identityWarning,
+  };
+}
+
+/**
  * Publish a project as a GitHub repo (private by default) and bind it.
  *
- * opts: { name, owner, visibility, description, rebind, dryRun, runGh, runGit }
+ * opts: { name, owner, visibility, description, rebind, dryRun, token, fetch,
+ *         account, runGh, runGit }
+ *   - token: when present, publish goes through the REST API (no gh needed).
  *   - runGh / runGit: injected runners (tests). When runGh is injected the gh
  *     availability check is skipped and `owner` must be supplied by the caller.
  *   - dryRun: validate + return the plan only; no git/gh execution, no writes.
@@ -990,11 +1160,31 @@ async function publishProject(root, projectId, opts = {}) {
     return { ok: false, code: 'already_bound', remote: existing, error: `呢個專案已經綁定咗 remote：${existing}。可以揀「更改 remote」覆蓋，或者先解除綁定。` };
   }
 
+  // Token-first: create the repo through the REST API (no gh needed at all).
+  if (opts.token) {
+    if (opts.dryRun) {
+      return { ok: true, dryRun: true, wouldInit: !(st && st.isRepo), viaToken: true, name, owner, visibility, description };
+    }
+    return publishViaToken(root, projectId, {
+      name,
+      owner,
+      visibility,
+      description,
+      dir,
+      st,
+      g,
+      token: opts.token,
+      fetch: opts.fetch,
+      account: opts.account,
+      rebind: opts.rebind,
+    });
+  }
+
   // gh availability + default owner.
   if (!injected) {
-    const gh = await ghAvailable();
-    if (!gh.installed) return { ok: false, code: 'gh_missing', error: '未安裝 gh CLI。安裝：winget install GitHub.cli' };
-    if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login' };
+    const gh = await ghAvailable(opts.runGh);
+    if (!gh.installed) return { ok: false, code: 'gh_missing', error: NO_AUTH_MSG };
+    if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login，或喺 app 內『連接 GitHub』' };
     if (!owner) owner = gh.login;
   }
 
@@ -1005,17 +1195,26 @@ async function publishProject(root, projectId, opts = {}) {
 
   // 1. Init a repo (with an initial commit) if the folder isn't one yet.
   let initialized = false;
+  let needIdentitySetup = false;
+  let identityWarning = null;
   if (needsInit) {
-    const ini = await gitInit(root, projectId, { branch: 'main' });
+    const ini = await gitInit(root, projectId, { branch: 'main', ghUser: opts.ghUser, useGh: opts.useGh });
     if (!ini.ok) return { ok: false, code: 'init_failed', error: ini.error, plan };
     initialized = true;
+    needIdentitySetup = !!ini.needIdentitySetup;
+    identityWarning = ini.warning || null;
   }
-  // Guarantee at least one commit exists.
+  // Guarantee at least one commit exists (with a resolved identity).
   const head = await g(['rev-parse', '--verify', 'HEAD'], dir);
   if (!head.ok) {
     await g(['add', '-A'], dir, GIT_TIMEOUT_MS);
-    const c = await g(['commit', '-m', 'chore: initial commit'], dir, GIT_TIMEOUT_MS);
-    if (!c.ok) return { ok: false, code: 'commit_failed', error: (c.stderr || '').trim(), plan };
+    const id = await ensureGitIdentity(dir, { ghUser: opts.ghUser, useGh: opts.useGh });
+    const c = await g([...identityArgs(id), 'commit', '-m', 'chore: initial commit'], dir, GIT_TIMEOUT_MS);
+    if (!c.ok) return { ok: false, code: 'commit_failed', error: (c.stderr || '').trim() || 'commit failed', plan };
+    if (id.needSetup) {
+      needIdentitySetup = true;
+      identityWarning = id.warning || identityWarning;
+    }
   }
 
   // 2. Create the remote (primary: create --source --push).
@@ -1035,14 +1234,14 @@ async function publishProject(root, projectId, opts = {}) {
     }
     const wb = await bindPublished(root, projectId, plan);
     if (!wb.ok) return { ok: false, code: 'bind_failed', error: wb.error, plan };
-    return { ok: true, initialized, bound: true, fallbackUsed: true, url: plan.url, repo: plan.target, visibility, remote: plan.url, plan, steps: fb.steps };
+    return { ok: true, initialized, bound: true, fallbackUsed: true, url: plan.url, repo: plan.target, visibility, remote: plan.url, plan, steps: fb.steps, needIdentitySetup, identityWarning };
   }
 
   // 3. Primary succeeded (gh pushed) → ensure origin + write binding.
   await ensureOrigin(dir, plan.url, g);
   const wb = await bindPublished(root, projectId, plan);
   if (!wb.ok) return { ok: false, code: 'bind_failed', error: wb.error, plan };
-  return { ok: true, initialized, bound: true, url: plan.url, repo: plan.target, visibility, remote: plan.url, plan, steps: [{ step: 'create', ok: true, detail: plan.target }] };
+  return { ok: true, initialized, bound: true, url: plan.url, repo: plan.target, visibility, remote: plan.url, plan, steps: [{ step: 'create', ok: true, detail: plan.target }], needIdentitySetup, identityWarning };
 }
 
 /** Write the .pcproject.json binding for a just-published repo. */

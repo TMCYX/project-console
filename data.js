@@ -12,9 +12,10 @@
  */
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { ensureGitIdentity, identityArgs } = require('./git-identity');
+const github = require('./github');
 
 /**
  * Resolve the default data root (the folder that holds project folders).
@@ -1539,6 +1540,57 @@ function runGit(args, cwd, timeoutMs = GIT_TIMEOUT_MS) {
 }
 
 /**
+ * Pure: build the argv for a network git op (fetch/pull/push).
+ *
+ * When a token is supplied AND the remote is a github URL, the token is inlined
+ * into a per-command authenticated URL (`https://x-access-token:<token>@…`) so
+ * it is NEVER written into `.git/config` (the stored remote stays clean). When
+ * there is no token, or the remote is not github, the normal remote is used.
+ *
+ * kind: 'fetch' | 'pull' | 'push'
+ * ctx:  { remote, token, branch, hasUpstream }
+ * Returns { args: string[], authed: boolean }.
+ */
+function resolveGitNetwork(kind, ctx = {}) {
+  const remote = ctx.remote || null;
+  const branch = ctx.branch || 'main';
+  const hasUpstream = !!ctx.hasUpstream;
+  const url = ctx.token ? github.authedRemoteUrl(remote, ctx.token) : null;
+
+  if (kind === 'fetch') {
+    if (url) return { args: ['fetch', url, `+refs/heads/${branch}:refs/remotes/origin/${branch}`], authed: true };
+    return { args: ['fetch', 'origin', branch], authed: false };
+  }
+  if (kind === 'pull') {
+    if (url) return { args: ['pull', '--rebase', '--autostash', url, branch], authed: true };
+    return { args: ['pull', '--rebase', '--autostash'], authed: false };
+  }
+  if (kind === 'push') {
+    // Never use `-u` with an authed URL (that would persist the token).
+    if (url) return { args: ['push', url, `${branch}:${branch}`], authed: true };
+    return { args: hasUpstream ? ['push'] : ['push', '-u', 'origin', branch], authed: false };
+  }
+  return { args: [], authed: false };
+}
+
+/** Friendly network error (never surfaces raw git stderr to the user). */
+function friendlyNetworkError(kind, res) {
+  const stderr = String((res && res.stderr) || '');
+  if (res && res.timedOut) return `git ${kind} timed out`;
+  if (/could not resolve host|network|unable to access|connection|offline|proxy/i.test(stderr)) {
+    return '連唔到 remote（offline / 網絡問題）— 檢查網絡後再試。';
+  }
+  if (/authentication|401|403|forbidden|invalid username|password|terminal prompts disabled|permission denied/i.test(stderr)) {
+    return '認證失敗 — 請喺 app 內『連接 GitHub』貼一個有效 token，或者用 gh 登入。';
+  }
+  if (/rejected|non-fast-forward|fetch first|failed to push/i.test(stderr)) {
+    return 'push 被拒（remote 有新 commit）— 先 Sync / pull 再 push。';
+  }
+  const first = stderr.trim().split('\n').find((l) => l.trim()) || `git ${kind} failed`;
+  return first.slice(0, 300);
+}
+
+/**
  * Full status of a project's git working tree.
  * Returns { ok, isRepo, remote, branch, ahead, behind, dirty, lastCommit, bound, hasUpstream, binding }.
  */
@@ -1625,21 +1677,24 @@ async function gitStatus(root, projectId) {
   };
 }
 
-/** git pull --rebase --autostash. */
-async function gitPull(root, projectId) {
+/** git pull (per-command authed URL when a token is supplied; else plain pull). */
+async function gitPull(root, projectId, opts) {
   const r = projectDirOrError(root, projectId);
   if (r.error) return { ok: false, error: r.error };
   const st = await gitStatus(root, projectId);
   if (!st.isRepo) return { ok: false, error: 'not a git repository' };
   if (!st.remote) return { ok: false, error: 'no git remote configured (bind a repo first)' };
-  if (!st.hasUpstream) return { ok: false, error: 'current branch has no upstream (push once first)' };
-  const res = await runGit(['pull', '--rebase', '--autostash'], r.dir, GIT_TIMEOUT_MS);
+  const branch = st.branch || (st.binding && st.binding.branch) || 'main';
+  const net = resolveGitNetwork('pull', { remote: st.remote, token: opts && opts.token, branch, hasUpstream: st.hasUpstream });
+  if (!net.authed && !st.hasUpstream) return { ok: false, error: 'current branch has no upstream (push once first)' };
+  const run = typeof (opts && opts.runGit) === 'function' ? opts.runGit : runGit;
+  const res = await run(net.args, r.dir, GIT_TIMEOUT_MS);
   return {
     ok: res.ok,
     stdout: res.stdout.trim(),
     stderr: res.stderr.trim(),
     timedOut: res.timedOut,
-    error: res.ok ? undefined : res.timedOut ? 'git pull timed out' : res.stderr.trim() || 'git pull failed',
+    error: res.ok ? undefined : friendlyNetworkError('pull', res),
   };
 }
 
@@ -1652,40 +1707,61 @@ async function gitCommit(root, projectId, message, opts) {
   const st = await gitStatus(root, projectId);
   if (!st.isRepo) return { ok: false, error: 'not a git repository' };
   if (!st.dirty) return { ok: true, committed: false, message: msg };
+  // Resolve (and persist) a git identity so the commit never hard-fails.
+  const id = await ensureGitIdentity(r.dir, opts || {});
   const add = await runGit(['add', '-A'], r.dir, GIT_TIMEOUT_MS);
-  if (!add.ok) return { ok: false, error: add.stderr.trim() || 'git add failed' };
-  const args = ['commit', '-m', msg];
+  if (!add.ok) return { ok: false, error: add.stderr.trim() || 'git add failed', identity: idInfo(id) };
+  const args = [...identityArgs(id), 'commit', '-m', msg];
   if (opts && opts.author) args.push(`--author=${opts.author}`);
   const res = await runGit(args, r.dir, GIT_TIMEOUT_MS);
   return {
     ok: res.ok,
     committed: res.ok,
     message: msg,
+    identity: idInfo(id),
+    needIdentitySetup: !!id.needSetup,
+    warning: id.needSetup ? id.warning : undefined,
     stdout: res.stdout.trim(),
     timedOut: res.timedOut,
-    error: res.ok
-      ? undefined
-      : res.timedOut
-        ? 'git commit timed out'
-        : res.stderr.trim() || 'git commit failed (is your git user.name/email set?)',
+    error: res.ok ? undefined : res.timedOut ? 'git commit timed out' : friendlyGitError(res.stderr),
   };
 }
 
-/** git push (sets upstream on first push). */
-async function gitPush(root, projectId) {
+function idInfo(id) {
+  return { name: id.name, email: id.email, source: id.source };
+}
+
+/** Turn common git commit failures into a friendly message with the next step. */
+function friendlyGitError(stderr) {
+  const s = String(stderr || '');
+  if (/author identity unknown|please tell me who you are|unable to auto-detect email|empty ident name/i.test(s)) {
+    return '未能設定 git 身份（commit 需要 user.name / user.email）。喺 app「設定 git 身份」輸入你嘅名同 email 即可。';
+  }
+  return s.trim() || 'git commit failed';
+}
+
+/** git push (per-command authed URL when a token is supplied; else normal remote). */
+async function gitPush(root, projectId, opts) {
   const r = projectDirOrError(root, projectId);
   if (r.error) return { ok: false, error: r.error };
   const st = await gitStatus(root, projectId);
   if (!st.isRepo) return { ok: false, error: 'not a git repository' };
   if (!st.remote) return { ok: false, error: 'no git remote configured (bind a repo first)' };
-  const args = st.hasUpstream ? ['push'] : ['push', '-u', 'origin', st.branch || 'main'];
-  const res = await runGit(args, r.dir, GIT_TIMEOUT_MS);
+  const branch = st.branch || (st.binding && st.binding.branch) || 'main';
+  const net = resolveGitNetwork('push', { remote: st.remote, token: opts && opts.token, branch, hasUpstream: st.hasUpstream });
+  const run = typeof (opts && opts.runGit) === 'function' ? opts.runGit : runGit;
+  const res = await run(net.args, r.dir, GIT_TIMEOUT_MS);
+  if (res.ok && net.authed) {
+    // Track the CLEAN origin (never the tokened URL) so the token is not persisted.
+    await runGit(['config', `branch.${branch}.remote`, 'origin'], r.dir);
+    await runGit(['config', `branch.${branch}.merge`, `refs/heads/${branch}`], r.dir);
+  }
   return {
     ok: res.ok,
     stdout: res.stdout.trim(),
     stderr: res.stderr.trim(),
     timedOut: res.timedOut,
-    error: res.ok ? undefined : res.timedOut ? 'git push timed out' : res.stderr.trim() || 'git push failed',
+    error: res.ok ? undefined : friendlyNetworkError('push', res),
   };
 }
 
@@ -1708,8 +1784,40 @@ async function gitInit(root, projectId, opts) {
     }
   }
   await runGit(['add', '-A'], r.dir, GIT_TIMEOUT_MS);
-  const c = await runGit(['commit', '-m', 'chore: init project repo'], r.dir, GIT_TIMEOUT_MS);
-  return { ok: true, initialized: true, committed: c.ok, warning: c.ok ? undefined : c.stderr.trim() };
+  const id = await ensureGitIdentity(r.dir, opts || {});
+  const c = await runGit([...identityArgs(id), 'commit', '-m', 'chore: init project repo'], r.dir, GIT_TIMEOUT_MS);
+  return {
+    ok: true,
+    initialized: true,
+    committed: c.ok,
+    identity: idInfo(id),
+    needIdentitySetup: !!id.needSetup,
+    warning: c.ok ? (id.needSetup ? id.warning : undefined) : friendlyGitError(c.stderr),
+  };
+}
+
+/** Effective git identity for a project (read-only). */
+async function gitIdentityInfo(root, projectId) {
+  const r = projectDirOrError(root, projectId);
+  if (r.error) return { ok: false, error: r.error };
+  const id = await ensureGitIdentity(r.dir, { useGh: false, persist: false });
+  return { ok: true, name: id.name, email: id.email, source: id.source, needSetup: !!id.needSetup };
+}
+
+/** Persist a repo-local git identity (name + email). Never touches global config. */
+async function setGitIdentity(root, projectId, name, email) {
+  const r = projectDirOrError(root, projectId);
+  if (r.error) return { ok: false, error: r.error };
+  const n = String(name == null ? '' : name).trim();
+  const e = String(email == null ? '' : email).trim();
+  if (!n) return { ok: false, error: '請輸入名（name）' };
+  if (!e || !/^[^\s@]+@[^\s@]+$/.test(e)) return { ok: false, error: '請輸入有效嘅 email' };
+  const st = await gitStatus(root, projectId);
+  if (!st.isRepo) return { ok: false, error: '呢個專案未係 git repo（先 bind / 發佈）' };
+  const a = await runGit(['config', 'user.name', n], r.dir);
+  const b = await runGit(['config', 'user.email', e], r.dir);
+  if (!a.ok || !b.ok) return { ok: false, error: (a.stderr || b.stderr || '').trim() || 'write failed' };
+  return { ok: true, name: n, email: e };
 }
 
 /** Validate a clone URL: https / ssh / git / file scheme, or a local path. */
@@ -1743,13 +1851,24 @@ async function gitClone(url, destDir, opts) {
   } catch (err) {
     return { ok: false, error: `cannot create parent dir: ${err.message}` };
   }
-  const res = await runGit(['clone', '--', v.url, dest], path.dirname(dest), GIT_CLONE_TIMEOUT_MS);
+  // Clone with a per-command authenticated URL when a token is supplied, then
+  // rewrite origin back to the CLEAN url so the token is never persisted.
+  const authed = opts && opts.token ? github.authedRemoteUrl(v.url, opts.token) : null;
+  const cloneUrl = authed || v.url;
+  const res = await runGit(['clone', '--', cloneUrl, dest], path.dirname(dest), GIT_CLONE_TIMEOUT_MS);
   if (!res.ok) {
     return {
       ok: false,
       timedOut: res.timedOut,
-      error: res.timedOut ? 'git clone timed out' : res.stderr.trim() || 'git clone failed',
+      error: res.timedOut ? 'git clone timed out' : friendlyNetworkError('clone', res),
     };
+  }
+  if (authed) {
+    try {
+      await runGit(['remote', 'set-url', 'origin', v.url], dest);
+    } catch (_) {
+      /* best effort — the clone still succeeded */
+    }
   }
   let projectId = path.basename(dest);
   const planRes = readJsonSafe(path.join(dest, 'plan.json'));
@@ -1766,7 +1885,12 @@ async function gitBind(root, projectId, remote, opts) {
   const branch = (opts && opts.branch) || 'main';
   const st0 = await gitStatus(root, projectId);
   if (!st0.isRepo) {
-    const ini = await gitInit(root, projectId, { branch });
+    const ini = await gitInit(root, projectId, {
+      branch,
+      account: opts && opts.account,
+      ghUser: opts && opts.ghUser,
+      useGh: opts && opts.useGh,
+    });
     if (!ini.ok) return ini;
   }
   const has = await runGit(['remote', 'get-url', 'origin'], r.dir);
@@ -1774,6 +1898,12 @@ async function gitBind(root, projectId, remote, opts) {
     ? await runGit(['remote', 'set-url', 'origin', url], r.dir)
     : await runGit(['remote', 'add', 'origin', url], r.dir);
   if (!setRes.ok) return { ok: false, error: setRes.stderr.trim() || 'git remote failed' };
+  // Resolve a repo-local identity now so the first commit never hard-fails.
+  await ensureGitIdentity(r.dir, {
+    account: opts && opts.account,
+    ghUser: opts && opts.ghUser,
+    useGh: opts && opts.useGh,
+  });
   const wb = writeBinding(root, projectId, { remote: url, branch, projectId });
   if (!wb.ok) return wb;
   return { ok: true, remote: url, branch, binding: wb.binding };
@@ -1876,8 +2006,8 @@ async function gitSync(root, projectId, opts) {
   let pushed = false;
   let message = null;
 
-  if (st0.remote && st0.hasUpstream) {
-    const pr = await gitPull(root, projectId);
+  if (st0.remote && (st0.hasUpstream || (opts && opts.token && github.parseGitHubRemote(st0.remote)))) {
+    const pr = await gitPull(root, projectId, { token: opts && opts.token });
     steps.push({ step: 'pull', ok: pr.ok, detail: pr.error || pr.stdout });
     if (!pr.ok) return { ok: false, phase: 'pull', error: pr.error, steps };
     pulled = true;
@@ -1886,14 +2016,14 @@ async function gitSync(root, projectId, opts) {
   const st1 = await gitStatus(root, projectId);
   if (st1.dirty) {
     message = (opts && opts.message) || (await deriveCommitMessage(root, projectId));
-    const cr = await gitCommit(root, projectId, message, { author: opts && opts.author });
+    const cr = await gitCommit(root, projectId, message, { author: opts && opts.author, account: opts && opts.account, useGh: opts && opts.useGh });
     steps.push({ step: 'commit', ok: cr.ok, detail: cr.error || message });
     if (!cr.ok) return { ok: false, phase: 'commit', error: cr.error, message, steps };
     committed = true;
   }
 
   if (st1.remote) {
-    const pr = await gitPush(root, projectId);
+    const pr = await gitPush(root, projectId, { token: opts && opts.token });
     steps.push({ step: 'push', ok: pr.ok, detail: pr.error || pr.stdout });
     if (!pr.ok) return { ok: false, phase: 'push', error: pr.error, message, steps };
     pushed = true;
@@ -1966,11 +2096,18 @@ module.exports = {
   writeBinding,
   // team sync: git layer
   runGit,
+  resolveGitNetwork,
+  friendlyNetworkError,
+  friendlyGitError,
   gitStatus,
   gitPull,
   gitCommit,
   gitPush,
   gitInit,
+  gitIdentityInfo,
+  setGitIdentity,
+  ensureGitIdentity,
+  identityArgs,
   gitBind,
   gitClone,
   gitSync,

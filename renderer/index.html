@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self';"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://avatars.githubusercontent.com https://*.githubusercontent.com; font-src 'self';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Project Console</title>
@@ -27,6 +27,10 @@
         <button id="dash-btn" class="btn btn--ghost" type="button" data-top="dashboard">儀表板</button>
         <button id="myday-btn" class="btn btn--ghost" type="button" data-top="myday">我今日要做</button>
         <button id="roadmap-btn" class="btn btn--ghost" type="button" data-top="roadmap">路線圖</button>
+        <button id="github-btn" class="btn btn--ghost gh-topbtn" type="button" title="連接 GitHub（一個 link + 貼 token，唔使 gh CLI）">
+          <span class="ghchip is-off" id="gh-chip" data-gh-chip>未連接</span>
+          <span class="gh-topbtn__label">連接 GitHub</span>
+        </button>
         <button id="theme-btn" class="btn btn--ghost" type="button">深色</button>
         <button id="density-btn" class="btn btn--ghost" type="button">緊湊</button>
         <button id="undo-btn" class="btn" type="button" title="Undo (Ctrl+Z)" disabled>Undo</button>
@@ -80,6 +84,7 @@
     <div class="ctx" id="ctx-menu" hidden></div>
     <div class="guide" id="guide" hidden></div>
     <div class="print-root" id="print-root" hidden></div>
+    <div class="ghpanel" id="github-panel" hidden></div>
     <div class="confirm" id="confirm" hidden>
       <div class="confirm__box">
         <p class="confirm__msg" id="confirm-msg"></p>

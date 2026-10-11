@@ -92,6 +92,15 @@ contextBridge.exposeInMainWorld('api', {
   // Publish: real git (init/bind) but a FAKE gh runner — creates no real repo.
   publishProject: async (projectId, opts) => gitx.publishProject(roots, projectId, { ...(opts || {}), runGh: harnessGh }),
 
+  // in-app GitHub connection — inert here (this harness exercises the gh path).
+  githubTokenUrl: async () => 'https://github.com/settings/tokens/new?scopes=repo,read:user&description=Project%20Console',
+  githubOpenTokenPage: async () => ok(),
+  githubStatus: async () => ({ ok: true, connected: false, encrypted: false }),
+  githubConnect: async () => ({ ok: false, code: 'harness', error: 'no network in this harness' }),
+  githubDisconnect: async () => ok(),
+  identityGet: async () => ({ ok: true, name: 'Harness', email: 'harness@example.com', source: 'existing' }),
+  identitySet: async () => ok({ name: 'Harness', email: 'harness@example.com' }),
+
   // inert stubs for paths the harness never triggers
   addTask: async () => ok({ task: { id: 'T9.9' } }),
   updateTask: async () => ok(),

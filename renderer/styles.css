@@ -1213,6 +1213,7 @@ code,
   font-size: 13.5px;
   color: var(--ink);
   line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .field__value.is-mono {
@@ -2744,3 +2745,87 @@ html.print-export .wbs-canvas { transform-origin: top left; }
 .pubrow .kicker { min-width: 72px; }
 .pubvis { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; margin-right: 12px; }
 .pubops { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+
+/* ======================= In-app GitHub connection ====================== */
+.gh-topbtn { display: inline-flex; align-items: center; gap: 7px; }
+.gh-topbtn__label { display: inline; }
+.ghchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  border: 1px solid var(--rule-strong);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.ghchip::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: none;
+  background: var(--ink-3);
+}
+.ghchip.is-off { color: var(--ink-3); }
+.ghchip.is-on { color: var(--rag-green); border-color: var(--rag-green); }
+.ghchip.is-on::before { background: var(--rag-green); }
+
+.ghpanel {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 84px 16px 16px;
+  background: rgba(0, 0, 0, 0.32);
+}
+.ghpanel[hidden] { display: none; }
+.ghpanel__box {
+  width: 100%;
+  max-width: 560px;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  padding: 0 0 18px;
+}
+.ghpanel__body { padding: 12px 22px 0; }
+.ghpanel .note { font-size: 12px; line-height: 1.55; color: var(--ink-2); }
+.ghpanel .pubrow { margin: 10px 0; }
+.ghpanel code { font-family: var(--mono); font-size: 11.5px; }
+
+.ghsteps { display: flex; flex-direction: column; gap: 12px; }
+.ghacct {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0 14px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 14px;
+}
+.ghavatar {
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-2);
+  object-fit: cover;
+}
+.ghacct__meta { display: flex; flex-direction: column; gap: 3px; }
+.ghacct__login { font-family: var(--mono); font-size: 14px; color: var(--ink); }
+.ghacct__note { font-size: 11px; color: var(--ink-3); }
+
+.ghbanner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  margin: 0 0 18px;
+  border: 1px solid var(--vermilion);
+  background: var(--paper-2);
+}
+.ghbanner__text { font-size: 12.5px; line-height: 1.5; color: var(--ink-2); }
+.ghbanner__text b { color: var(--ink); }
+.ghbanner .btn { flex: none; }

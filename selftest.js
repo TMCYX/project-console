@@ -58,8 +58,10 @@ const {
   gitSync,
   deriveCommitMessage,
   commitMessageFromDiff,
+  resolveGitNetwork,
 } = require('./data');
 const gx = require('./gitx');
+const github = require('./github');
 
 const ROOT = process.env.PROJECT_CONSOLE_ROOT || DEFAULT_ROOT;
 
@@ -915,6 +917,216 @@ function gitx(args, cwd) {
   check('publishProject: gh not authed → gh_not_authed', (await gx.publishProject(gRoot, 'puby', { name: 'puby', owner: 'me', runGh: fakeNoAuth })).code === 'gh_not_authed');
   const fakeNoGh = async () => ({ ok: false, code: -1, stdout: '', stderr: 'gh: command not found' });
   check('publishProject: gh missing → gh_missing', (await gx.publishProject(gRoot, 'puby', { name: 'puby', owner: 'me', runGh: fakeNoGh })).code === 'gh_missing');
+
+  /* ================= In-app GitHub connection (token / no gh) ============ */
+
+  console.log('');
+  console.log('GitHub connection — token store / API / auth URL / identity:');
+
+  // A tiny fetch mock (no network): records calls, returns Response-like objects.
+  function mockFetch(handler) {
+    const calls = [];
+    const f = async (url, init) => {
+      calls.push({ url, init });
+      const r = handler(url, init) || {};
+      const status = r.status || 200;
+      return { ok: status >= 200 && status < 300, status, text: async () => (r.body === undefined ? '' : JSON.stringify(r.body)) };
+    };
+    f.calls = calls;
+    return f;
+  }
+  function writeMinimalProject(dir, id) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'plan.json'),
+      JSON.stringify({ schema: 'omo-project/plan@2', id, title: id, created: '2026-10-11', target: '2026-10-20', phases: [{ id: 'P1', name: 'P' }], tasks: [], milestones: [], risks: [] })
+    );
+    fs.writeFileSync(path.join(dir, 'progress.json'), JSON.stringify({ schema: 'omo-project/progress@1', project: id, updated: null, tasks: {} }));
+    return dir;
+  }
+
+  /* --- token store round-trip (temp userData) --------------------------- */
+  const storeDir = path.join(gitTmp, 'gh-userdata');
+  const plainStore = github.createTokenStore({ dir: storeDir, safeStorage: null });
+  check('token store: encryption unavailable → plain fallback', plainStore.encryptionAvailable() === false);
+  const w1 = plainStore.write('ghp_plain_123');
+  check('token store: plain write ok', w1.ok && w1.encrypted === false, JSON.stringify(w1));
+  check('token store: plain round-trips', plainStore.read() === 'ghp_plain_123', plainStore.read());
+  check('token store: clear removes the token', plainStore.clear().ok && plainStore.read() === null);
+
+  const encDir = path.join(gitTmp, 'gh-userdata-enc');
+  const fakeSafe = {
+    isEncryptionAvailable: () => true,
+    encryptString: (s) => Buffer.from('ENC:' + s, 'utf8'),
+    decryptString: (b) => b.toString('utf8').replace(/^ENC:/, ''),
+  };
+  const encStore = github.createTokenStore({ dir: encDir, safeStorage: fakeSafe });
+  check('token store: encryption available → true', encStore.encryptionAvailable() === true);
+  const w2 = encStore.write('ghp_secret_xyz');
+  check('token store: encrypted write ok', w2.ok && w2.encrypted === true, JSON.stringify(w2));
+  check('token store: encrypted round-trips', encStore.read() === 'ghp_secret_xyz', encStore.read());
+  const rawEnc = fs.readFileSync(encStore.path(), 'utf8');
+  check('token store: encrypted file does NOT contain the raw token', !rawEnc.includes('ghp_secret_xyz'), rawEnc.slice(0, 60));
+  check('token store: file lives under the temp dir', path.dirname(encStore.path()) === encDir);
+
+  /* --- REST helpers with an injected fetch (no real network) ------------ */
+  const fUser = mockFetch(() => ({ status: 200, body: { login: 'octocat', id: 7, name: 'Mona', avatar_url: 'https://a/u/7' } }));
+  const u = await github.getUser({ token: 't0k', fetch: fUser });
+  check('github.getUser: parses login/id/avatar', u.ok && u.login === 'octocat' && u.id === '7' && u.avatarUrl === 'https://a/u/7', JSON.stringify(u));
+  check('github.getUser: hits /user with a Bearer token', fUser.calls[0].url.endsWith('/user') && fUser.calls[0].init.headers.Authorization === 'Bearer t0k', fUser.calls[0].url);
+
+  const fCreate = mockFetch(() => ({ status: 201, body: { full_name: 'octocat/newrepo', html_url: 'https://github.com/octocat/newrepo', clone_url: 'https://github.com/octocat/newrepo.git', private: true, name: 'newrepo', owner: { login: 'octocat' } } }));
+  const cr = await github.createRepo('newrepo', { private: true, description: 'desc' }, { token: 't', fetch: fCreate, login: 'octocat' });
+  check('github.createRepo: posts /user/repos for the authed user', fCreate.calls[0].url.endsWith('/user/repos'), fCreate.calls[0].url);
+  const cbody = JSON.parse(fCreate.calls[0].init.body);
+  check('github.createRepo: body has name/private/description', cbody.name === 'newrepo' && cbody.private === true && cbody.description === 'desc', JSON.stringify(cbody));
+  check('github.createRepo: returns url + fullName', cr.ok && cr.fullName === 'octocat/newrepo' && /newrepo/.test(cr.htmlUrl), JSON.stringify(cr));
+
+  const fOrg = mockFetch(() => ({ status: 201, body: { full_name: 'acme/x', html_url: 'https://github.com/acme/x', name: 'x', owner: { login: 'acme' } } }));
+  await github.createRepo('x', { private: false }, { token: 't', fetch: fOrg, owner: 'acme', login: 'octocat' });
+  check('github.createRepo: posts /orgs/<owner>/repos when owner ≠ login', fOrg.calls[0].url.endsWith('/orgs/acme/repos'), fOrg.calls[0].url);
+
+  const fCols = mockFetch(() => ({ status: 200, body: [{ login: 'a', permissions: { push: true }, role_name: 'write' }, { login: 'b', permissions: { pull: true } }] }));
+  const lc = await github.listCollaborators('octocat/r', { token: 't', fetch: fCols });
+  check('github.listCollaborators: maps permissions', lc.ok && lc.collaborators[0].permission === 'WRITE' && lc.collaborators[1].permission === 'READ', JSON.stringify(lc.collaborators));
+
+  const fAdd = mockFetch(() => ({ status: 201, body: { id: 1 } }));
+  const ac = await github.addCollaborator('octocat/r', 'friend', 'read', { token: 't', fetch: fAdd });
+  check('github.addCollaborator: PUT permission:pull', fAdd.calls[0].init.method === 'PUT' && JSON.parse(fAdd.calls[0].init.body).permission === 'pull' && ac.permission === 'pull', JSON.stringify(ac));
+
+  const fRm = mockFetch(() => ({ status: 204 }));
+  const rm = await github.removeCollaborator('octocat/r', 'friend', { token: 't', fetch: fRm });
+  check('github.removeCollaborator: DELETE', fRm.calls[0].init.method === 'DELETE' && rm.ok, JSON.stringify(rm));
+
+  const fPerm = mockFetch(() => ({ status: 200, body: { permissions: { admin: false, push: true, pull: true }, private: true, full_name: 'octocat/r', default_branch: 'main', html_url: 'https://github.com/octocat/r' } }));
+  const rp = await github.repoPermissions('octocat/r', { token: 't', fetch: fPerm });
+  check('github.repoPermissions: WRITE → canPush', rp.ok && rp.permission === 'WRITE' && rp.canPush === true && rp.readOnly === false, JSON.stringify(rp));
+  const fRead = mockFetch(() => ({ status: 200, body: { permissions: { pull: true } } }));
+  const rpr = await github.repoPermissions('octocat/r', { token: 't', fetch: fRead });
+  check('github.repoPermissions: READ → readOnly', rpr.permission === 'READ' && rpr.readOnly === true && rpr.canPush === false, JSON.stringify(rpr));
+
+  const f401 = mockFetch(() => ({ status: 401, body: { message: 'Bad credentials' } }));
+  const bad = await github.getUser({ token: 'bad', fetch: f401 });
+  check('github: 401 → bad_token (friendly)', bad.ok === false && bad.code === 'bad_token' && /token/.test(bad.error || ''), JSON.stringify(bad));
+  const f404 = mockFetch(() => ({ status: 404, body: { message: 'Not Found' } }));
+  const nfRes = await github.repoPermissions('octocat/nope', { token: 't', fetch: f404 });
+  check('github: 404 → not_found', nfRes.code === 'not_found', JSON.stringify(nfRes));
+  const noTok = await github.getUser({ fetch: f401 });
+  check('github: missing token short-circuits before any fetch', noTok.ok === false && noTok.code === 'no_token' && f401.calls.length === 1, JSON.stringify(noTok));
+
+  /* --- authenticated git URL construction ------------------------------ */
+  check('authedRemoteUrl: https github → x-access-token', github.authedRemoteUrl('https://github.com/acme/priv.git', 'T') === 'https://x-access-token:T@github.com/acme/priv.git', github.authedRemoteUrl('https://github.com/acme/priv.git', 'T'));
+  check('authedRemoteUrl: ssh github → https + token', github.authedRemoteUrl('git@github.com:acme/priv.git', 'T') === 'https://x-access-token:T@github.com/acme/priv.git');
+  check('authedRemoteUrl: non-github → null', github.authedRemoteUrl('https://gitlab.com/acme/priv.git', 'T') === null);
+  check('authedRemoteUrl: no token → null', github.authedRemoteUrl('https://github.com/acme/priv.git', '') === null);
+
+  const np = resolveGitNetwork('push', { remote: 'https://github.com/acme/priv.git', token: 'SECRET', branch: 'main', hasUpstream: false });
+  check('resolveGitNetwork push: per-command token URL, no -u', np.authed === true && np.args[0] === 'push' && String(np.args[1]).includes('x-access-token:SECRET') && np.args.indexOf('-u') === -1, JSON.stringify(np.args));
+  const np2 = resolveGitNetwork('push', { remote: '/tmp/local.git', token: 'SECRET', branch: 'main', hasUpstream: false });
+  check('resolveGitNetwork push: non-github remote ignores token (plain -u)', np2.authed === false && np2.args[0] === 'push' && np2.args[1] === '-u', JSON.stringify(np2.args));
+  const nf2 = resolveGitNetwork('fetch', { remote: 'https://github.com/acme/priv.git', token: 'SECRET', branch: 'main' });
+  check('resolveGitNetwork fetch: authed url + origin refspec', nf2.authed === true && String(nf2.args[1]).includes('x-access-token:SECRET') && String(nf2.args[2]).includes('refs/remotes/origin/main'), JSON.stringify(nf2.args));
+
+  /* --- token is NEVER written into .git/config -------------------------- */
+  const cfgDir = writeMinimalProject(path.join(gRoot, 'cfgtest'), 'cfgtest');
+  const bindCfg = await gitBind(gRoot, 'cfgtest', 'https://github.com/acme/priv.git', { branch: 'main', useGh: false });
+  check('gitBind to a github https remote ok', bindCfg.ok, bindCfg.error);
+  const pushCalls = [];
+  const fakeGit = async (args) => {
+    pushCalls.push(args.slice());
+    return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false };
+  };
+  const pr = await gitPush(gRoot, 'cfgtest', { token: 'ghp_SECRET_TOKEN', runGit: fakeGit });
+  check('gitPush(token): push runs with the authed URL', pr.ok && pushCalls[0] && pushCalls[0][0] === 'push' && String(pushCalls[0][1]).includes('x-access-token:ghp_SECRET_TOKEN'), JSON.stringify(pushCalls[0]));
+  const cfgRaw = fs.readFileSync(path.join(cfgDir, '.git', 'config'), 'utf8');
+  check('gitPush(token): token NOT written into .git/config', !cfgRaw.includes('ghp_SECRET_TOKEN'), 'LEAKED');
+  check('gitPush(token): remote.origin.url stays clean', /url = https:\/\/github\.com\/acme\/priv\.git/.test(cfgRaw), cfgRaw.split('\n').filter((l) => l.includes('url')).join(' | '));
+
+  /* --- identity: login/id → noreply email; commit with NO global identity */
+  const emptyCfg = path.join(gitTmp, 'empty-gitconfig');
+  fs.writeFileSync(emptyCfg, '');
+  const envKeys = ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'];
+  const savedEnv = {};
+  for (const k of envKeys) savedEnv[k] = process.env[k];
+  process.env.GIT_CONFIG_GLOBAL = emptyCfg;
+  process.env.GIT_CONFIG_SYSTEM = emptyCfg;
+  // No ambient author env either, so the -c/-config path is what's exercised.
+  delete process.env.GIT_AUTHOR_NAME;
+  delete process.env.GIT_AUTHOR_EMAIL;
+  delete process.env.GIT_COMMITTER_NAME;
+  delete process.env.GIT_COMMITTER_EMAIL;
+  try {
+    // (a) identity derived from a connected account, written repo-local only
+    const idDir = writeMinimalProject(path.join(gRoot, 'idtest'), 'idtest');
+    const ini2 = await gitInit(gRoot, 'idtest', { account: { login: 'octocat', id: '42' }, useGh: false });
+    check('gitInit(account) ok', ini2.ok, ini2.error);
+    check('identity name = login', ini2.identity && ini2.identity.name === 'octocat', JSON.stringify(ini2.identity));
+    check('identity email = <id>+<login>@users.noreply.github.com', ini2.identity && ini2.identity.email === '42+octocat@users.noreply.github.com', JSON.stringify(ini2.identity));
+    check('identity source = github', ini2.identity && ini2.identity.source === 'github', JSON.stringify(ini2.identity));
+    check('identity persisted repo-local', gitx(['config', 'user.name'], idDir) === 'octocat', gitx(['config', 'user.name'], idDir));
+    const globalName = await runGit(['config', '--global', 'user.name'], idDir);
+    check('global user.name NOT written', !(globalName.ok && globalName.stdout.trim()), globalName.stdout);
+
+    // (b) commit with NO global identity + no gh → bot identity, never hard-fails
+    const niDir = writeMinimalProject(path.join(gRoot, 'noident'), 'noident');
+    gitx(['init', '-b', 'main'], niDir);
+    const crNI = await gitCommit(gRoot, 'noident', 'commit with no identity', { useGh: false });
+    check('commit with no global identity does NOT hard-fail', crNI.ok && crNI.committed === true, JSON.stringify(crNI));
+    check('fallback bot identity used', crNI.identity && crNI.identity.source === 'fallback' && crNI.identity.name === 'Project Console', JSON.stringify(crNI.identity));
+    check('needIdentitySetup flagged', crNI.needIdentitySetup === true);
+    const niAuthor = gitx(['log', '-1', '--format=%an <%ae>'], niDir);
+    check('commit author = bot identity', niAuthor === 'Project Console <project-console@localhost>', niAuthor);
+
+    // (c) commit with a connected account → noreply author
+    const acDir = writeMinimalProject(path.join(gRoot, 'acctident'), 'acctident');
+    gitx(['init', '-b', 'main'], acDir);
+    const crAc = await gitCommit(gRoot, 'acctident', 'account commit', { account: { login: 'octocat', id: '42' }, useGh: false });
+    check('commit with a connected account succeeds', crAc.ok && crAc.committed === true, JSON.stringify(crAc));
+    const acAuthor = gitx(['log', '-1', '--format=%an <%ae>'], acDir);
+    check('commit author = account noreply', acAuthor === 'octocat <42+octocat@users.noreply.github.com>', acAuthor);
+  } finally {
+    for (const k of envKeys) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  }
+
+  /* --- friendly no-token / no-gh message + token-first routing ---------- */
+  const ghInfoDir = writeMinimalProject(path.join(gRoot, 'ghinfo'), 'ghinfo');
+  gitx(['init', '-b', 'main'], ghInfoDir);
+  gitx(['config', 'user.name', 'Selftest'], ghInfoDir);
+  gitx(['config', 'user.email', 'selftest@example.com'], ghInfoDir);
+  gitx(['add', '-A'], ghInfoDir);
+  gitx(['commit', '-m', 'init ghinfo'], ghInfoDir);
+  gitx(['remote', 'add', 'origin', 'https://github.com/acme/priv.git'], ghInfoDir);
+  const noGh = async () => ({ ok: false, code: -1, stdout: '', stderr: 'gh: command not found' });
+  const inv = await gx.inviteCollaborator(gRoot, 'ghinfo', 'friend', 'push', { runGh: noGh });
+  check('no token + no gh → friendly in-app message', inv.ok === false && inv.code === 'gh_missing' && inv.error === github.NO_AUTH_MSG, JSON.stringify(inv));
+
+  const fShare = mockFetch((url) => {
+    if (/\/collaborators/.test(url)) return { status: 200, body: [{ login: 'friend', permissions: { push: true }, role_name: 'write' }] };
+    if (/\/invitations/.test(url)) return { status: 200, body: [] };
+    return { status: 200, body: { permissions: { admin: true, push: true, pull: true }, private: true, full_name: 'acme/priv', default_branch: 'main', html_url: 'https://github.com/acme/priv' } };
+  });
+  const siTok = await gx.shareInfo(gRoot, 'ghinfo', { token: 't', fetch: fShare, account: { login: 'octocat' } });
+  check('shareInfo (token) ok, me + collaborators from the API', siTok && siTok.ok === true && siTok.me === 'octocat' && siTok.collaborators[0].login === 'friend' && siTok.permission === 'ADMIN', JSON.stringify(siTok && siTok.permission));
+
+  const pubTokDir = writeMinimalProject(path.join(gRoot, 'pubtok'), 'pubtok');
+  const fCreate2 = mockFetch(() => ({ status: 201, body: { full_name: 'octocat/pubtok', html_url: 'https://github.com/octocat/pubtok', clone_url: 'https://github.com/octocat/pubtok.git', private: true, name: 'pubtok', owner: { login: 'octocat' } } }));
+  const pubGitCalls = [];
+  const fakeGit2 = async (args) => {
+    pubGitCalls.push(args.slice());
+    return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false };
+  };
+  const pubTok = await gx.publishProject(gRoot, 'pubtok', { name: 'pubtok', visibility: 'private', description: '', token: 'ghp_TOK', fetch: fCreate2, account: { login: 'octocat', id: '42' }, runGit: fakeGit2 });
+  check('publishProject (token) ok + bound + viaToken', pubTok.ok === true && pubTok.viaToken === true && pubTok.bound === true, JSON.stringify(pubTok && pubTok.code));
+  check('publishProject (token): created via /user/repos', fCreate2.calls[0] && fCreate2.calls[0].url.endsWith('/user/repos'), fCreate2.calls[0] && fCreate2.calls[0].url);
+  const pubPush = pubGitCalls.find((c) => c[0] === 'push');
+  check('publishProject (token): push uses the authed URL', !!pubPush && String(pubPush[1]).includes('x-access-token:ghp_TOK'), JSON.stringify(pubPush));
+  check('publishProject (token): wrote the binding', /octocat\/pubtok/.test(readJsonSafe(path.join(pubTokDir, '.pcproject.json')).value.remote), 'no binding');
+  check('publishProject (token): token NOT in .git/config', !fs.readFileSync(path.join(pubTokDir, '.git', 'config'), 'utf8').includes('ghp_TOK'));
+  {/* end GitHub-connection section */}
+
 })()
   .catch((err) => {
     failed++;

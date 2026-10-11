@@ -68,6 +68,19 @@ app.whenReady().then(async () => {
   win.webContents.on('preload-error', (_e, _p, err) => errors.push('preload-error: ' + err.message));
 
   const js = (code) => win.webContents.executeJavaScript(code);
+  async function waitForJs(code, timeoutMs = 8000, step = 120) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      try {
+        const v = await js(code);
+        if (v) return v;
+      } catch (_) {
+        /* keep polling */
+      }
+      await delay(step);
+    }
+    return null;
+  }
 
   try {
     await win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -94,6 +107,67 @@ app.whenReady().then(async () => {
     );
     check('help button is labelled 使用說明', !placement.missing && /使用說明/.test(placement.label || ''), placement.label);
 
+    process.stdout.write('\nGitHub connect panel (token, no CLI):\n');
+    const ghTop = await js(`(() => {
+      const btn = document.getElementById('github-btn');
+      const chip = document.getElementById('gh-chip');
+      const banner = !!document.querySelector('.ghbanner [data-gh-open]');
+      return { btn: !!btn, chip: chip ? chip.textContent.trim() : null, banner };
+    })()`);
+    check('topbar shows a 連接 GitHub entry', ghTop.btn);
+    check('status chip reads 未連接 when disconnected', /未連接/.test(ghTop.chip || ''), ghTop.chip);
+    check('dashboard shows the connect banner when not connected', ghTop.banner);
+
+    await js(`document.getElementById('github-btn').click()`);
+    await delay(180);
+    const ghPanel = await js(`(() => {
+      const p = document.getElementById('github-panel');
+      if (!p || p.hidden) return { open: false };
+      return {
+        open: true,
+        link: !!p.querySelector('[data-gh-open-token]'),
+        input: !!p.querySelector('[data-gh-token]'),
+        connect: !!p.querySelector('[data-gh-connect]'),
+      };
+    })()`);
+    check('clicking the entry opens the connect panel', ghPanel.open);
+    check(
+      'panel renders the link button + paste input + connect button',
+      ghPanel.link && ghPanel.input && ghPanel.connect,
+      JSON.stringify(ghPanel)
+    );
+
+    const openedToken = await js(`(async () => { const r = await window.api.githubOpenTokenPage(); return r && r.ok === true; })()`);
+    check('link button opens the token page (shell.openExternal path)', openedToken === true);
+
+    // paste a token + connect → connected state shows @login + avatar
+    await js(`(() => { document.querySelector('[data-gh-token]').value = 'ghp_harness_token'; return true; })()`);
+    await js(`document.querySelector('[data-gh-connect]').click()`);
+    const connected = await waitForJs(`/已連接 @octocat/.test((document.getElementById('gh-chip')||{}).textContent||'')`, 6000);
+    check(
+      'after connect the chip shows 已連接 @login',
+      !!connected,
+      await js(`(document.getElementById('gh-chip')||{}).textContent`)
+    );
+    const acct = await js(`(() => { const el = document.querySelector('[data-gh-login]'); return el ? el.textContent.trim() : null; })()`);
+    check('connected panel shows the account @login', /@octocat/.test(acct || ''), acct);
+    check('connected panel shows the avatar', await js(`!!document.querySelector('.ghavatar')`));
+
+    // disconnect → confirm → back to 未連接
+    await js(`document.querySelector('[data-gh-disconnect]').click()`);
+    await waitForJs(`!document.getElementById('confirm').hidden`, 3000);
+    await js(`document.getElementById('confirm-ok').click()`);
+    const disconnected = await waitForJs(`/未連接/.test((document.getElementById('gh-chip')||{}).textContent||'')`, 6000);
+    check(
+      'after disconnect the chip returns to 未連接',
+      !!disconnected,
+      await js(`(document.getElementById('gh-chip')||{}).textContent`)
+    );
+    // close the panel so it cannot intercept later interactions
+    const closeClicked = await js(`(() => { const b = document.querySelector('[data-gh-close]'); if (b) { b.click(); return true; } return false; })()`);
+    await delay(150);
+    check('panel can be closed', closeClicked === true && (await js(`document.getElementById('github-panel').hidden`)));
+
     process.stdout.write('\nOpen / render:\n');
     await js(`document.getElementById('help-btn').click()`);
     await delay(220);
@@ -118,6 +192,11 @@ app.whenReady().then(async () => {
     check('guide renders a TOC with >= 10 entries', opened.toc >= 10, 'got ' + opened.toc);
     check('guide renders the shortcuts table', opened.hasShortcuts && opened.shortcutRows >= 5, 'rows=' + opened.shortcutRows);
     check('guide has a close button', opened.hasClose);
+
+    // Stabilize: force the entrance animation to its end state so geometry is
+    // measured deterministically (a hidden window can leave it mid-flight).
+    await js(`(() => { for (const a of document.getAnimations()) { try { a.finish(); } catch (_) {} } return true; })()`);
+    await delay(60);
 
     process.stdout.write('\n900px behavior:\n');
     win.setContentSize(900, 760);

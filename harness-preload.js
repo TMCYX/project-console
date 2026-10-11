@@ -63,6 +63,9 @@ const payload = {
 
 const ok = (extra) => Object.assign({ ok: true }, extra || {});
 
+// Stateful GitHub-connection stub so the harness can drive connect / disconnect.
+let ghState = { connected: false, login: null, avatarUrl: null, encrypted: true };
+
 contextBridge.exposeInMainWorld('api', {
   getProjects: async () => payload,
   refresh: async () => payload,
@@ -120,4 +123,17 @@ contextBridge.exposeInMainWorld('api', {
   myday: async () => ({ overdue: [], today: [], week: [], ready: [], count: 0 }),
   gitIntegrate: async () => ok({ upToDate: true }),
   gitResolve: async () => ({ ok: false, error: 'stub' }),
+  // in-app GitHub connection — a stateful stub so the connect panel can be driven
+  githubTokenUrl: async () => 'https://github.com/settings/tokens/new?scopes=repo,read:user&description=Project%20Console',
+  githubOpenTokenPage: async () => ok(),
+  githubStatus: async () => ({ ok: true, ...ghState }),
+  githubConnect: async (token) => {
+    if (!token) return { ok: false, code: 'no_token', error: '請貼上 GitHub token' };
+    ghState = { connected: true, login: 'octocat', avatarUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=', encrypted: true };
+    return { ok: true, login: 'octocat', avatarUrl: ghState.avatarUrl, encrypted: true };
+  },
+  githubDisconnect: async () => {
+    ghState = { connected: false, login: null, avatarUrl: null, encrypted: true };
+    return ok();
+  },
 });
