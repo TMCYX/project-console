@@ -1023,7 +1023,7 @@ async function publishViaFallback(run, g, dir, plan) {
   const create = await run(plan.fallbackCreate);
   if (!create.ok) {
     const code = classifyGhError(create.stderr || create.stdout);
-    if (/already exists|already taken|name already exists/i.test(create.stderr || '')) {
+    if (/already exists|already taken|name already exists|repository creation failed/i.test((create.stderr || '') + (create.stdout || ''))) {
       return { ok: false, code: 'repo_exists', error: `repo 名「${plan.name}」已經有人用咗，改個名再試。`, steps };
     }
     return { ok: false, code, error: (create.stderr || create.stdout || '').trim() || 'gh repo create failed', steps };
@@ -1221,7 +1221,7 @@ async function publishProject(root, projectId, opts = {}) {
   const res = await run(plan.primary);
   if (!res.ok) {
     const code = classifyGhError(res.stderr || res.stdout);
-    if (/already exists|already taken|name already exists|repository .* exists/i.test(res.stderr || '')) {
+    if (/already exists|already taken|name already exists|repository .* exists|repository creation failed/i.test((res.stderr || '') + (res.stdout || ''))) {
       return { ok: false, code: 'repo_exists', error: `repo 名「${plan.target}」已經有人用咗，改個名再試。`, argv: plan.primary, plan };
     }
     if (code === 'gh_missing') return { ok: false, code, error: '未安裝 gh CLI。安裝：winget install GitHub.cli', plan };

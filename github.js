@@ -343,8 +343,27 @@ async function createRepo(name, options = {}, opts = {}) {
   const apiPath = useOrg ? `/orgs/${owner}/repos` : '/user/repos';
   const r = await api('POST', apiPath, { ...opts, body });
   if (!r.ok) {
-    if (r.status === 422 && /already exists|name already exists|taken/i.test(String(r.value && r.value.message))) {
-      return { ok: false, code: 'repo_exists', status: r.status, error: `repo 名「${repo}」已經有人用咗，改個名再試。`, value: r.value };
+    if (r.status === 422) {
+      // GitHub puts the useful text in errors[] and only "Repository creation
+      // failed." in message — check both before deciding it's a name conflict.
+      const v = r.value && typeof r.value === 'object' ? r.value : {};
+      const detail = [v.message]
+        .concat(Array.isArray(v.errors) ? v.errors.map((e) => (e && (e.message || e.code)) || '') : [])
+        .filter(Boolean)
+        .join(' ');
+      if (/already exists|name already exists|taken|creation failed|invalid name|reserved/i.test(detail)) {
+        const conflict = /already exists|name already exists|taken/i.test(detail);
+        return {
+          ok: false,
+          code: conflict ? 'repo_exists' : 'bad_name',
+          status: r.status,
+          error: conflict
+            ? `repo 名「${repo}」已經有人用咗，改個名再試。`
+            : `GitHub 唔接受呢個 repo 名「${repo}」：${detail}`,
+          value: v,
+        };
+      }
+      return { ok: false, code: 'validation', status: 422, error: detail || 'GitHub 拒絕咗呢個請求（參數唔啱）', value: v };
     }
     return r;
   }
