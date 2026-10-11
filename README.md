@@ -88,15 +88,19 @@ The app **only ever writes** inside a project folder — `plan.json`,
 and never outside the data root(s). Every write is atomic (temp file + rename)
 and merge-preserving.
 
-## Team workflow (git sync)
+## Sharing a project with your team
 
-1. Host: open a project → **Sync** menu → **綁定 git remote** (or create the
-   repo with `gh`). The app writes `.pcproject.json` and sets the remote.
-2. Host invites collaborators to the private repo (Part B / `gh api`).
-3. Teammate: dashboard → **加入 Git 專案** → paste the repo URL → the app clones
-   it into `~/ProjectConsole/<name>` and opens it.
-4. Anyone ticks a task → **Sync** → the app pulls (rebase), commits with an auto
-   message, and pushes. Others pull the same way.
+The **app repo is public** (anyone can install it); **project repos are private + collaborators**. Sharing is zero-CLI:
+
+1. **Host — publish**: open the project → toolbar **「發佈」** → confirm repo name / owner / visibility (**private** by default) → the app runs `gh repo create --source=… --push`, writes `.pcproject.json`, and shows the URL.
+   *(CLI fallback: `gh repo create <name> --private --source=<project folder> --push`)*
+2. **Host — invite**: project header **「分享」** → enter the teammate's GitHub username → pick a permission:
+   - **write** — can edit & tick
+   - **pull** — **read-only** (view-only, like a SharePoint view link)
+3. **Teammate — join**: accept the GitHub invite → dashboard **「加入 Git 專案」** → paste the repo URL → the app clones it into `~/ProjectConsole/<name>` and opens it.
+4. **Daily**: tick / edit → **Sync** (pull → commit → push). The **歷程** tab shows who changed what (commit log + task-level diff + one-click restore). Edits to different tasks auto-merge (field-level 3-way); same-task conflicts raise the conflict UI. Without push rights the app goes **read-only** (唯讀 chip).
+
+Requirements: `git` on `PATH`; for publish/invite, the **`gh`** CLI logged in (`gh auth login`).
 
 ## Views
 

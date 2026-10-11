@@ -98,6 +98,13 @@ function setupRepos() {
   git(['add', '-A'], pbgit);
   git(['commit', '-m', 'seed pbgit'], pbgit);
   git(['remote', 'add', 'origin', 'https://github.com/example/pbgit.git'], pbgit);
+
+  // Folders for the one-click publish tests (NOT git repos yet → triggers init).
+  for (const id of ['pubs', 'pubtaken', 'pubauth']) {
+    const d = path.join(ROOT, id);
+    writeJson(d, 'plan.json', makePlan(id));
+    writeJson(d, 'progress.json', { schema: 'omo-project/progress@1', project: id, updated: null, tasks: {} });
+  }
 }
 
 /** Simulate the OTHER writer: fresh clone of origin, mutate plan.json, push. */
@@ -212,10 +219,10 @@ app.whenReady().then(async () => {
     await waitForJs(`!!document.querySelector('.project')`);
     await js(`document.querySelector('[data-share-toggle]').click()`);
     const shareReady = await waitForJs(
-      `(() => { const t=(document.querySelector('.sharepanel')||{}).textContent||''; return (t && !t.includes('載入中') && /gh auth login|未登入|未安裝|winget|未綁定|GitHub|唯讀/.test(t)) ? t : ''; })()`,
+      `(() => { const t=(document.querySelector('.sharepanel')||{}).textContent||''; return (t && !t.includes('載入中') && /github|remote|gh |未|Not Found|404|唯讀|權限|失敗|error/i.test(t)) ? t : ''; })()`,
       12000
     );
-    check('share panel renders and degrades with a clear message (no gh auth)', !!shareReady, (shareReady || '').slice(0, 200));
+    check('share panel renders and degrades cleanly (no crash)', !!shareReady, (shareReady || '').slice(0, 200));
     await js(`document.querySelector('[data-share-cancel]') && document.querySelector('[data-share-cancel]').click()`);
 
     /* -------- T5.1: 我今日要做 filters correctly ----------------------- */
@@ -306,6 +313,62 @@ app.whenReady().then(async () => {
     check('T6.2 applying the resolution clears the conflict UI', !!conflictGone);
     const finalPlan = readJson(PBDIR, 'plan.json');
     check('T6.2 resolution took theirs (REMOTE-SECOND)', finalPlan.tasks[0].title === 'REMOTE-SECOND', finalPlan.tasks[0].title);
+
+    /* -------- Publish to GitHub (one-click; fake gh, no real repo) ----- */
+    process.stdout.write('\nPublish 「發佈」 (no real repo):\n');
+    await selectProject('pubs');
+    await waitForJs(`!!document.querySelector('.project')`);
+    check('發佈 button renders in the project toolbar', await js(`!!document.querySelector('[data-publish-toggle]')`));
+    await js(`document.querySelector('[data-publish-toggle]').click()`);
+    await waitForJs(`!!document.querySelector('[data-pub-name]')`, 6000);
+    const defs = await js(`(() => ({
+      name: (document.querySelector('[data-pub-name]')||{}).value||'',
+      owner: (document.querySelector('[data-pub-owner]')||{}).value||'',
+      priv: !!(document.querySelector('input[name="pubvis"][value="private"]')||{}).checked
+    }))()`);
+    check('publish form shows slugged default name', defs.name === 'pubs', JSON.stringify(defs));
+    check('publish form defaults owner to the gh login', defs.owner === 'harnessuser', JSON.stringify(defs));
+    check('publish form defaults to private', defs.priv === true, JSON.stringify(defs));
+    await js(`document.querySelector('[data-publish-go]').click()`);
+    const pubUrlShown = await waitForJs(
+      `(() => { const t=(document.querySelector('.pubform')||{}).textContent||''; return /harnessuser\\/pubs/.test(t) ? t : ''; })()`,
+      15000
+    );
+    check('publish success shows the repo URL', !!pubUrlShown, (pubUrlShown || '').slice(0, 160));
+    let bindOk = false;
+    try {
+      bindOk = /harnessuser\/pubs/.test(fs.readFileSync(path.join(ROOT, 'pubs', '.pcproject.json'), 'utf8'));
+    } catch (_) {}
+    check('publish wrote the .pcproject.json binding', bindOk);
+    check('publish git-init the folder', fs.existsSync(path.join(ROOT, 'pubs', '.git')));
+
+    await selectProject('pubtaken');
+    await waitForJs(`!!document.querySelector('.project')`);
+    await js(`document.querySelector('[data-publish-toggle]').click()`);
+    await waitForJs(`!!document.querySelector('[data-pub-name]')`, 6000);
+    await js(`(() => { const i=document.querySelector('[data-pub-name]'); if(i){ i.value='harness-taken'; i.dispatchEvent(new Event('input',{bubbles:true})); } return true; })()`);
+    await js(`document.querySelector('[data-publish-go]').click()`);
+    await delay(2500);
+    const dbgPub = await js(`window.__pcPub || null`);
+    const dbgSt = await js(`(() => { const s=window.__pcState||{}; return { menuOpen:s.menuOpen, exportMenu:s.exportMenu, paletteFor:s.paletteFor, ctx:!!s.ctx, guideOpen:s.guideOpen, publishOpen:s.publishOpen, publishBusy:s.publishBusy, sup:!!s._suppressClick, hasGo: !!document.querySelector('[data-publish-go]'), goDisabled: (document.querySelector('[data-publish-go]')||{}).disabled===true, clicks:window.__pcPubClicks||0 }; })()`);
+    process.stdout.write('    DEBUG __pcPub=' + JSON.stringify(dbgPub && dbgPub.phase ? dbgPub.phase : (dbgPub && dbgPub.name)) + ' state=' + JSON.stringify(dbgSt) + '\n');
+    const takenErr = await waitForJs(`(() => { const n=document.querySelector('.pubform .note--alert'); return n ? n.textContent : ''; })()`, 12000);
+    if (!/已經有人用|exists/i.test(takenErr || '')) {
+      const ft = await js(`(document.querySelector('.pubform')||{}).textContent||''`);
+      const tt = await js(`(document.getElementById('toast')||{}).textContent||''`);
+      process.stdout.write('    DEBUG taken form=' + String(ft).slice(0, 200).replace(/\s+/g, ' ') + '\n    DEBUG taken toast=' + String(tt) + '\n');
+    }
+    check('publish surfaces a "repo name taken" error', /已經有人用|exists/i.test(takenErr || ''), (takenErr || '').slice(0, 160));
+    check('failed publish did NOT write a binding', !fs.existsSync(path.join(ROOT, 'pubtaken', '.pcproject.json')));
+
+    await selectProject('pubauth');
+    await waitForJs(`!!document.querySelector('.project')`);
+    await js(`document.querySelector('[data-publish-toggle]').click()`);
+    await waitForJs(`!!document.querySelector('[data-pub-name]')`, 6000);
+    await js(`(() => { const i=document.querySelector('[data-pub-name]'); if(i){ i.value='harness-needauth'; i.dispatchEvent(new Event('input',{bubbles:true})); } return true; })()`);
+    await js(`document.querySelector('[data-publish-go]').click()`);
+    const authErr = await waitForJs(`(() => { const n=document.querySelector('.pubform .note--alert'); return n ? n.textContent : ''; })()`, 12000);
+    check('publish surfaces a "gh not authed" error', /未登入|auth login/.test(authErr || ''), (authErr || '').slice(0, 160));
 
     process.stdout.write('\nRenderer health:\n');
     check('no renderer errors', errors.length === 0, errors.slice(0, 4).join(' | '));

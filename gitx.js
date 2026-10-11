@@ -27,7 +27,10 @@ const {
   atomicWriteText,
   backupProject,
   readBindingFile,
+  readBinding,
+  writeBinding,
   gitStatus,
+  gitInit,
   gitCommit,
   gitPush,
   deriveCommitMessage,
@@ -862,6 +865,193 @@ async function syncProject(root, projectId, opts) {
   return { ok: true, message, committed, pulled: integrated.fastForwarded === true || integrated.merged === true, merged: integrated.merged === true, pushed, steps, status: await gitStatus(root, projectId) };
 }
 
+/* ============================ publish to GitHub ========================== */
+/*
+ * One-click 「發佈到 GitHub」: create a private/public repo from a project
+ * folder using the gh CLI, push it, and write the .pcproject.json binding.
+ * Testable without touching GitHub via `opts.dryRun` (plan only) and
+ * `opts.runGh` (injected gh runner used by the selftest/harness).
+ */
+
+const REPO_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const GH_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+function repoNameError(name) {
+  const s = String(name == null ? '' : name).trim();
+  if (!s) return '請輸入 repo 名';
+  if (s === '.' || s === '..') return 'repo 名唔可以係 "." 或 ".."';
+  if (!REPO_NAME_RE.test(s)) return 'repo 名只可以係英文字母、數字、. _ -（唔可以有空格或 /）';
+  return null;
+}
+
+/** Slugify a project id/title into a GitHub-safe repo name. */
+function slugifyRepoName(s) {
+  return String(s == null ? '' : s)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 100);
+}
+
+/**
+ * Pure: build the gh argv (and URL) for a publish. Exposed so the argv shape
+ * can be asserted without creating any repo.
+ */
+function publishPlan(input) {
+  const name = String(input.name == null ? '' : input.name).trim();
+  const owner = String(input.owner == null ? '' : input.owner).trim();
+  const visibility = input.visibility === 'public' ? 'public' : 'private';
+  const description = String(input.description == null ? '' : input.description).trim();
+  const dir = input.dir;
+  const vis = visibility === 'public' ? '--public' : '--private';
+  const target = owner ? `${owner}/${name}` : name;
+
+  // Primary: create + set source + push in one shot.
+  const primary = ['repo', 'create', target, vis];
+  if (description) primary.push('--description', description);
+  primary.push('--source', dir, '--push');
+
+  // Fallback: create (under the authed user), then add remote + push manually.
+  const fallbackCreate = ['repo', 'create', name, vis];
+  if (description) fallbackCreate.push('--description', description);
+
+  const url = `https://github.com/${owner ? owner + '/' : ''}${name}`;
+  return { name, owner: owner || null, visibility, description, dir, target, primary, fallbackCreate, url };
+}
+
+/** Ensure `origin` points at `url` (add or set-url). */
+async function ensureOrigin(dir, url, g) {
+  const has = await g(['remote', 'get-url', 'origin'], dir);
+  if (has.ok) {
+    if (has.stdout.trim() !== url) await g(['remote', 'set-url', 'origin', url], dir);
+  } else {
+    await g(['remote', 'add', 'origin', url], dir);
+  }
+}
+
+/** Fallback path: gh repo create (no source) → add remote → push -u origin main. */
+async function publishViaFallback(run, g, dir, plan) {
+  const steps = [];
+  const create = await run(plan.fallbackCreate);
+  if (!create.ok) {
+    const code = classifyGhError(create.stderr || create.stdout);
+    if (/already exists|already taken|name already exists/i.test(create.stderr || '')) {
+      return { ok: false, code: 'repo_exists', error: `repo 名「${plan.name}」已經有人用咗，改個名再試。`, steps };
+    }
+    return { ok: false, code, error: (create.stderr || create.stdout || '').trim() || 'gh repo create failed', steps };
+  }
+  steps.push({ step: 'create', ok: true, detail: plan.name });
+  await ensureOrigin(dir, plan.url, g);
+  const push = await g(['push', '-u', 'origin', 'main'], dir, GIT_TIMEOUT_MS);
+  steps.push({ step: 'push', ok: push.ok, detail: (push.stderr || '').trim() });
+  if (!push.ok) return { ok: false, code: 'push_failed', error: (push.stderr || '').trim() || 'git push failed', steps };
+  return { ok: true, url: plan.url, remote: plan.url, steps };
+}
+
+/**
+ * Publish a project as a GitHub repo (private by default) and bind it.
+ *
+ * opts: { name, owner, visibility, description, rebind, dryRun, runGh, runGit }
+ *   - runGh / runGit: injected runners (tests). When runGh is injected the gh
+ *     availability check is skipped and `owner` must be supplied by the caller.
+ *   - dryRun: validate + return the plan only; no git/gh execution, no writes.
+ */
+async function publishProject(root, projectId, opts = {}) {
+  const run = typeof opts.runGh === 'function' ? opts.runGh : runGh;
+  const g = typeof opts.runGit === 'function' ? opts.runGit : runGit;
+  const injected = typeof opts.runGh === 'function';
+
+  const r = projectDirOrError(root, projectId);
+  if (r.error) return { ok: false, code: 'no_project', error: r.error };
+  const dir = r.dir;
+
+  // Parse name / owner (accept "owner/name" in the name field).
+  let name = String(opts.name == null ? '' : opts.name).trim();
+  let owner = String(opts.owner == null ? '' : opts.owner).trim();
+  if (name.includes('/')) {
+    const parts = name.split('/');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      if (!owner) owner = parts[0];
+      name = parts[1];
+    }
+  }
+  const nameErr = repoNameError(name);
+  if (nameErr) return { ok: false, code: 'bad_name', error: nameErr };
+  if (owner && !GH_OWNER_RE.test(owner)) return { ok: false, code: 'bad_owner', error: `擁有者（owner）名唔啱：${owner}` };
+  const visibility = opts.visibility === 'public' ? 'public' : 'private';
+  const description = String(opts.description == null ? '' : opts.description).trim();
+
+  // Guard: already bound to a remote (unless the caller asks to re-bind).
+  const st = await gitStatus(root, projectId);
+  const bind = readBindingFile(dir);
+  const existing = (st && st.remote) || (bind.ok && bind.binding && bind.binding.remote) || null;
+  if (existing && !opts.rebind) {
+    return { ok: false, code: 'already_bound', remote: existing, error: `呢個專案已經綁定咗 remote：${existing}。可以揀「更改 remote」覆蓋，或者先解除綁定。` };
+  }
+
+  // gh availability + default owner.
+  if (!injected) {
+    const gh = await ghAvailable();
+    if (!gh.installed) return { ok: false, code: 'gh_missing', error: '未安裝 gh CLI。安裝：winget install GitHub.cli' };
+    if (!gh.authed) return { ok: false, code: 'gh_not_authed', error: 'gh 未登入。請執行：gh auth login' };
+    if (!owner) owner = gh.login;
+  }
+
+  const plan = publishPlan({ name, owner, visibility, description, dir });
+  const needsInit = !(st && st.isRepo);
+
+  if (opts.dryRun) return { ok: true, dryRun: true, wouldInit: needsInit, plan };
+
+  // 1. Init a repo (with an initial commit) if the folder isn't one yet.
+  let initialized = false;
+  if (needsInit) {
+    const ini = await gitInit(root, projectId, { branch: 'main' });
+    if (!ini.ok) return { ok: false, code: 'init_failed', error: ini.error, plan };
+    initialized = true;
+  }
+  // Guarantee at least one commit exists.
+  const head = await g(['rev-parse', '--verify', 'HEAD'], dir);
+  if (!head.ok) {
+    await g(['add', '-A'], dir, GIT_TIMEOUT_MS);
+    const c = await g(['commit', '-m', 'chore: initial commit'], dir, GIT_TIMEOUT_MS);
+    if (!c.ok) return { ok: false, code: 'commit_failed', error: (c.stderr || '').trim(), plan };
+  }
+
+  // 2. Create the remote (primary: create --source --push).
+  const res = await run(plan.primary);
+  if (!res.ok) {
+    const code = classifyGhError(res.stderr || res.stdout);
+    if (/already exists|already taken|name already exists|repository .* exists/i.test(res.stderr || '')) {
+      return { ok: false, code: 'repo_exists', error: `repo 名「${plan.target}」已經有人用咗，改個名再試。`, argv: plan.primary, plan };
+    }
+    if (code === 'gh_missing') return { ok: false, code, error: '未安裝 gh CLI。安裝：winget install GitHub.cli', plan };
+    if (code === 'gh_not_authed') return { ok: false, code, error: 'gh 未登入。請執行：gh auth login', plan };
+    if (code === 'offline') return { ok: false, code: 'offline', error: '連唔到 GitHub（network）。檢查網絡後再試。', plan };
+    // Fallback path.
+    const fb = await publishViaFallback(run, g, dir, plan);
+    if (!fb.ok) {
+      return { ok: false, code: fb.code || code || 'create_failed', error: fb.error || (res.stderr || '').trim() || 'gh repo create failed', argv: plan.primary, plan, steps: fb.steps };
+    }
+    const wb = await bindPublished(root, projectId, plan);
+    if (!wb.ok) return { ok: false, code: 'bind_failed', error: wb.error, plan };
+    return { ok: true, initialized, bound: true, fallbackUsed: true, url: plan.url, repo: plan.target, visibility, remote: plan.url, plan, steps: fb.steps };
+  }
+
+  // 3. Primary succeeded (gh pushed) → ensure origin + write binding.
+  await ensureOrigin(dir, plan.url, g);
+  const wb = await bindPublished(root, projectId, plan);
+  if (!wb.ok) return { ok: false, code: 'bind_failed', error: wb.error, plan };
+  return { ok: true, initialized, bound: true, url: plan.url, repo: plan.target, visibility, remote: plan.url, plan, steps: [{ step: 'create', ok: true, detail: plan.target }] };
+}
+
+/** Write the .pcproject.json binding for a just-published repo. */
+async function bindPublished(root, projectId, plan) {
+  const wb = writeBinding(root, projectId, { remote: plan.url, branch: 'main', projectId });
+  if (!wb.ok) return wb;
+  return { ok: true, binding: wb.binding };
+}
+
 module.exports = {
   parseRemote,
   permOf,
@@ -888,4 +1078,8 @@ module.exports = {
   integrateRemote,
   resolveMerge,
   syncProject,
+  repoNameError,
+  slugifyRepoName,
+  publishPlan,
+  publishProject,
 };

@@ -65,6 +65,8 @@ contextBridge.exposeInMainWorld('api', {
   // P6: merge / conflict
   gitIntegrate: (projectId) => ipcRenderer.invoke('git:integrate', { projectId }),
   gitResolve: (projectId, choices) => ipcRenderer.invoke('git:resolve', { projectId, choices }),
+  // publish to GitHub (one-click)
+  publishProject: (projectId, opts) => ipcRenderer.invoke('publish:project', { projectId, opts }),
   onUpdate: (cb) => {
     const handler = (_event, payload) => cb(payload);
     ipcRenderer.on('projects:update', handler);

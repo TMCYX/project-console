@@ -91,11 +91,19 @@ The app reads projects from its **data root** (resolution order):
 
 Any folder at any depth containing a `plan.json` is treated as a project.
 
-### 5. Team sync (optional)
+### 5. Team sync & sharing (optional)
 
-- In the app: open a project → **Sync** menu → bind it to a private git repo.
-- To join an existing project: **dashboard → 加入 Git 專案 → paste the repo URL**.
-  The app clones it into `~/ProjectConsole/<name>` and opens it. No manual CLI.
+**Host (project owner)**
+1. Open the project → toolbar **「發佈」** → creates a **private** repo (`gh repo create --source=… --push`), binds it, and shows the URL.
+   *(CLI fallback: `gh repo create <name> --private --source=<project folder> --push`)*
+2. Project header **「分享」** → invite a teammate by GitHub username → **write** (edit & tick) or **pull** (read-only).
+
+**Teammate**
+3. Accept the GitHub invite → dashboard **「加入 Git 專案」** → paste the repo URL → the app clones it into `~/ProjectConsole/<name>` and opens it. No manual CLI.
+
+**Daily**: tick / edit → **Sync** (pull → commit → push) · **歷程** tab = who changed what (+ task-level diff + restore) · edits to different tasks auto-merge; same-task conflicts show the conflict UI · no push rights → **read-only** (唯讀).
+
+Requires `git` on `PATH`; publish/invite need the **`gh`** CLI logged in (`gh auth login`).
 
 ---
 

@@ -420,6 +420,15 @@ ipcMain.handle('git:resolve', async (_e, a = {}) => {
   return r;
 });
 
+/* -------- one-click publish to GitHub ------------------------------------ */
+
+ipcMain.handle('publish:project', async (_e, a = {}) => {
+  const r = await gitx.publishProject(dataRoots, a.projectId, a.opts || {});
+  if (r.ok) broadcast('git');
+  else console.warn('[project-console] publish failed:', r.code || r.error);
+  return r;
+});
+
 // T2.4: clone a repo (default ~/ProjectConsole/<name>) and register its parent
 // dir as a data root so the app can open it immediately.
 ipcMain.handle('git:clone', async (_e, a = {}) => {

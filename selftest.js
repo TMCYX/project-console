@@ -859,6 +859,62 @@ function gitx(args, cwd) {
   // syncProject basic (clean + up to date).
   const syncRes = await gx.syncProject(twRoot, 'cloneA', {});
   check('syncProject ok (clean, up-to-date)', syncRes.ok === true, JSON.stringify(syncRes));
+
+  /* --- Publish to GitHub (one-click) — argv + validation, NO real repo --- */
+  const plan1 = gx.publishPlan({ name: 'foo', owner: 'o', visibility: 'private', description: '', dir: 'D' });
+  check('publishPlan: private argv', JSON.stringify(plan1.primary) === JSON.stringify(['repo', 'create', 'o/foo', '--private', '--source', 'D', '--push']), JSON.stringify(plan1.primary));
+  const plan2 = gx.publishPlan({ name: 'foo', owner: 'o', visibility: 'public', description: 'my desc', dir: 'D' });
+  check('publishPlan: public argv (+description)', JSON.stringify(plan2.primary) === JSON.stringify(['repo', 'create', 'o/foo', '--public', '--description', 'my desc', '--source', 'D', '--push']), JSON.stringify(plan2.primary));
+  const plan3 = gx.publishPlan({ name: 'foo', owner: '', visibility: 'private', dir: 'D' });
+  check('publishPlan: bare-name argv', JSON.stringify(plan3.primary) === JSON.stringify(['repo', 'create', 'foo', '--private', '--source', 'D', '--push']), JSON.stringify(plan3.primary));
+  check('publishPlan: fallback create argv', JSON.stringify(plan3.fallbackCreate) === JSON.stringify(['repo', 'create', 'foo', '--private']), JSON.stringify(plan3.fallbackCreate));
+  check('publishPlan: url', plan1.url === 'https://github.com/o/foo', plan1.url);
+  check('repoNameError: rejects spaces/slash/dot', !!gx.repoNameError('a b') && !!gx.repoNameError('a/b') && !!gx.repoNameError('.'));
+  check('repoNameError: accepts valid', gx.repoNameError('a-b.c_1') === null);
+  check('slugifyRepoName', gx.slugifyRepoName('Project Console — App') === 'project-console-app', gx.slugifyRepoName('Project Console — App'));
+
+  const mkPub = (id) => {
+    const d = path.join(gRoot, id);
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'plan.json'), JSON.stringify({ schema: 'omo-project/plan@2', id, title: id, created: '2026-10-11', target: '2026-10-20', phases: [{ id: 'P1', name: 'P' }], tasks: [], milestones: [], risks: [] }));
+    fs.writeFileSync(path.join(d, 'progress.json'), JSON.stringify({ schema: 'omo-project/progress@1', project: id, updated: null, tasks: {} }));
+    return d;
+  };
+  const pubz = mkPub('pubz');
+  const pubx = mkPub('pubx');
+  const puby = mkPub('puby');
+
+  // validation (dryRun, on a non-repo folder)
+  const dry = await gx.publishProject(gRoot, 'pubz', { name: 'pubz', owner: 'me', dryRun: true });
+  check('publishProject: non-repo folder → wouldInit', dry.ok === true && dry.dryRun === true && dry.wouldInit === true, JSON.stringify(dry));
+  check('publishProject: bad name rejected', (await gx.publishProject(gRoot, 'pubz', { name: 'a b', owner: 'me', dryRun: true })).code === 'bad_name');
+  check('publishProject: bad owner rejected', (await gx.publishProject(gRoot, 'pubz', { name: 'ok', owner: 'bad owner!', dryRun: true })).code === 'bad_owner');
+  check('publishProject: owner/name form parsed', (await gx.publishProject(gRoot, 'pubz', { name: 'myorg/myrepo', owner: '', dryRun: true })).plan.target === 'myorg/myrepo');
+  check('publishProject: already-bound project refused', (await gx.publishProject(gRoot, 'gp', { name: 'x', owner: 'me', dryRun: true })).code === 'already_bound');
+  check('publishProject: rebind bypasses the guard', (await gx.publishProject(gRoot, 'gp', { name: 'x', owner: 'me', dryRun: true, rebind: true })).ok === true);
+
+  // success via injected gh runner (no network): init → create → bind
+  const calls = [];
+  const fakeGh = async (argv) => {
+    calls.push(argv);
+    return { ok: true, code: 0, stdout: '✓ Created https://github.com/me/pubx on GitHub', stderr: '' };
+  };
+  const pub = await gx.publishProject(gRoot, 'pubx', { name: 'pubx', owner: 'me', visibility: 'private', description: 'desc', runGh: fakeGh });
+  check('publishProject: success (injected gh)', pub.ok === true && pub.bound === true && pub.url === 'https://github.com/me/pubx', JSON.stringify(pub));
+  check('publishProject: used the primary argv', JSON.stringify(calls[0]) === JSON.stringify(['repo', 'create', 'me/pubx', '--private', '--description', 'desc', '--source', pubx, '--push']), JSON.stringify(calls[0]));
+  check('publishProject: initialized the folder', fs.existsSync(path.join(pubx, '.git')));
+  check('publishProject: wrote the binding', /me\/pubx/.test(readJsonSafe(path.join(pubx, '.pcproject.json')).value.remote));
+  check('publishProject: private visibility reported', pub.visibility === 'private', pub.visibility);
+
+  // failure modes via injected runner
+  const fakeExists = async () => ({ ok: false, code: 1, stdout: '', stderr: 'GraphQL: Name already exists on this account (createRepository)' });
+  const pe = await gx.publishProject(gRoot, 'puby', { name: 'puby', owner: 'me', runGh: fakeExists });
+  check('publishProject: repo name taken → repo_exists', pe.ok === false && pe.code === 'repo_exists', JSON.stringify(pe));
+  check('publishProject: no binding written on failure', !fs.existsSync(path.join(puby, '.pcproject.json')));
+  const fakeNoAuth = async () => ({ ok: false, code: 1, stdout: '', stderr: 'please run: gh auth login' });
+  check('publishProject: gh not authed → gh_not_authed', (await gx.publishProject(gRoot, 'puby', { name: 'puby', owner: 'me', runGh: fakeNoAuth })).code === 'gh_not_authed');
+  const fakeNoGh = async () => ({ ok: false, code: -1, stdout: '', stderr: 'gh: command not found' });
+  check('publishProject: gh missing → gh_missing', (await gx.publishProject(gRoot, 'puby', { name: 'puby', owner: 'me', runGh: fakeNoGh })).code === 'gh_missing');
 })()
   .catch((err) => {
     failed++;

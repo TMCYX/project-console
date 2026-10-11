@@ -23,6 +23,26 @@ const ROOT = process.env.PC_HARNESS_ROOT;
 const roots = [ROOT];
 const ok = (extra) => Object.assign({ ok: true }, extra || {});
 
+/**
+ * Fake `gh` runner for the harness: simulates `repo create`, and failure modes
+ * keyed off the repo name (contains "harness-taken" / "-needauth" / "-noght").
+ * It never touches the network or GitHub, so no real repo is ever created.
+ */
+async function harnessGh(argv) {
+  const args = Array.isArray(argv) ? argv : [];
+  const text = args.join(' ');
+  const m = /harness-(taken|needauth|noght)/.exec(text);
+  if (m) {
+    if (m[1] === 'taken') return { ok: false, code: 1, stdout: '', stderr: 'GraphQL: Name already exists on this account (createRepository)' };
+    if (m[1] === 'needauth') return { ok: false, code: 1, stdout: '', stderr: 'To get started with GitHub CLI, please run: gh auth login' };
+    if (m[1] === 'noght') return { ok: false, code: 1, stdout: '', stderr: 'gh: command not found' };
+  }
+  if (args[0] === 'repo' && args[1] === 'create') {
+    return { ok: true, code: 0, stdout: '✓ Created repository ' + (args[2] || 'harnessuser/repo') + ' on GitHub\n', stderr: '' };
+  }
+  return { ok: true, code: 0, stdout: '', stderr: '' };
+}
+
 function payload() {
   const p = data.scanRoots(roots);
   return { root: roots[0], roots: roots.slice(), warnings: p.warnings, projects: p.projects };
@@ -64,10 +84,13 @@ contextBridge.exposeInMainWorld('api', {
   historyLog: async (projectId, opts) => gitx.historyLog(roots, projectId, opts),
   historyDiff: async (projectId, sha) => gitx.commitDiff(roots, projectId, sha),
   historyRestore: async (projectId, sha) => gitx.restoreCommit(roots, projectId, sha),
-  identity: async () => gitx.identity(),
+  identity: async () => ({ ok: true, gitUser: 'Harness', ghLogin: 'harnessuser', ghInstalled: true }),
   myday: async (who, today) => gitx.collectMyTasks(data.scanRoots(roots).projects, who, today),
   gitIntegrate: async (projectId) => gitx.integrateRemote(roots, projectId, {}),
   gitResolve: async (projectId, choices) => gitx.resolveMerge(roots, projectId, choices),
+
+  // Publish: real git (init/bind) but a FAKE gh runner — creates no real repo.
+  publishProject: async (projectId, opts) => gitx.publishProject(roots, projectId, { ...(opts || {}), runGh: harnessGh }),
 
   // inert stubs for paths the harness never triggers
   addTask: async () => ok({ task: { id: 'T9.9' } }),

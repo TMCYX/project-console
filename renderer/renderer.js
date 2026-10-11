@@ -94,6 +94,12 @@ const state = {
   // P6: conflict resolution
   conflicts: null, // array of conflicts awaiting a choice
   conflictBusy: false,
+  // Publish to GitHub (one-click)
+  publishOpen: false,
+  publishBusy: false,
+  publishResult: null, // success payload after a publish
+  publishError: null,
+  publishDraft: null, // {name, owner, visibility, description} — survives re-renders
 };
 
 const RAG_RANK = { red: 3, amber: 2, green: 1, grey: 0 };
@@ -365,6 +371,9 @@ function render() {
   renderTopbar();
   renderCtx();
   renderTaskPanel(project);
+  try {
+    window.__pcState = state;
+  } catch (_) {}
 }
 
 function renderTopbar() {
@@ -728,6 +737,7 @@ function renderProject(p) {
         ${readonlyChipHtml(p.id)}
         <button class="btn btn--ghost" type="button" data-git-sync title="Pull → 自動 commit → Push（git sync）"${ro ? ' disabled' : ''}>Sync</button>
         <button class="btn btn--ghost${state.shareOpen ? ' is-on' : ''}" type="button" data-share-toggle title="分享 / 協作者權限（Share）">分享</button>
+        <button class="btn btn--ghost${state.publishOpen ? ' is-on' : ''}" type="button" data-publish-toggle title="發佈到 GitHub（建立 private repo + push + 綁定）">發佈</button>
         <button class="btn btn--ghost${state.gitBindOpen ? ' is-on' : ''}" type="button" data-git-bind title="綁定 / 更換 git remote">Git…</button>
         <button class="btn" type="button" data-add-task title="新增任務 (n)"${ro ? ' disabled' : ''}>＋任務</button>
         <button class="btn btn--ghost" type="button" data-reschedule title="依 deps 重排 start"${ro ? ' disabled' : ''}>重排</button>
@@ -740,6 +750,7 @@ function renderProject(p) {
       ${state.exportMenu ? renderExportMenu() : ''}
       ${state.menuOpen ? renderOverflowMenu(p) : ''}
       ${state.gitBindOpen ? renderGitBindForm() : ''}
+      ${state.publishOpen ? renderPublishForm(p) : ''}
       ${state.shareOpen ? renderSharePanel(p) : ''}
       ${state.conflicts ? renderConflictPanel(p) : ''}
       ${ro ? readonlyBanner() : ''}
@@ -827,6 +838,52 @@ function renderGitClonePanel() {
     <button class="btn" type="button" data-git-clone-go${state.gitCloneBusy ? ' disabled' : ''}>${state.gitCloneBusy ? 'Clone 中…' : 'Clone'}</button>
     <button class="btn btn--ghost" type="button" data-git-clone-cancel>取消</button>
     <span class="note">clone 後會自動開啟該專案。</span>
+  </div>`;
+}
+
+/* ------------------------------ publish to GitHub ------------------------ */
+
+function slugify(s) {
+  return String(s == null ? '' : s)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 100);
+}
+
+function renderPublishForm(p) {
+  const busy = state.publishBusy;
+  const g = state.git[p.id];
+  const bound = !!(g && g.isRepo && g.remote);
+  const res = state.publishResult;
+  const err = state.publishError;
+  const draft = state.publishDraft || {};
+  const defName = draft.name != null ? draft.name : slugify(p.id || p.title || 'project');
+  const defOwner = draft.owner != null ? draft.owner : (state.identity && state.identity.ghLogin) || '';
+  const defVis = draft.visibility || 'private';
+  const defDesc = draft.description != null ? draft.description : p.title || '';
+  const header = `<div class="panelbar"><span class="kicker">發佈到 GitHub</span><span class="panelbar__spacer"></span>
+      <button class="btn btn--ghost" type="button" data-publish-cancel>${res ? '完成' : '取消'}</button></div>`;
+  if (res) {
+    return `<div class="pubform">${header}
+      <div class="note">✓ 已發佈到 <a class="shlink" href="${esc(res.url)}" target="_blank" rel="noreferrer">${esc(res.url)}</a>（${esc(res.visibility || 'private')}）${res.initialized ? ' · 已 git init' : ''}${res.fallbackUsed ? ' · 用咗 fallback 流程' : ''}</div>
+      <div class="note">下一步：撳上面「分享」邀請隊友（write = 可改可 tick；pull = 唯讀）。</div>
+    </div>`;
+  }
+  return `<div class="pubform">${header}
+    ${bound ? `<div class="note note--alert">呢個專案已經綁定咗 <span class="mono">${esc(g.remote)}</span>。重新發佈會覆蓋這個 remote。</div>` : ''}
+    <div class="pubrow"><span class="kicker">repo 名</span><input class="fin" type="text" data-pub-name value="${esc(defName)}" placeholder="my-project"></div>
+    <div class="pubrow"><span class="kicker">擁有者</span><input class="fin" type="text" data-pub-owner value="${esc(defOwner)}" placeholder="GitHub username / org（留空 = 用已登入帳號）"></div>
+    <div class="pubrow"><span class="kicker">可見性</span>
+      <label class="pubvis"><input type="radio" name="pubvis" value="private"${defVis === 'private' ? ' checked' : ''}> private（預設）</label>
+      <label class="pubvis"><input type="radio" name="pubvis" value="public"${defVis === 'public' ? ' checked' : ''}> public</label></div>
+    <div class="pubrow"><span class="kicker">描述</span><input class="fin fin--wide" type="text" data-pub-desc value="${esc(defDesc)}" placeholder="專案描述"></div>
+    ${err ? `<div class="note note--alert">${esc(err)}</div>` : ''}
+    <div class="pubops">
+      <button class="btn" type="button" data-publish-go${busy ? ' disabled' : ''}>${busy ? '發佈中…' : bound ? '更改 remote 並發佈' : '建立 private repo 並發佈'}</button>
+      <span class="note">會建立 repo、push 目前專案、寫入 .pcproject.json。</span>
+    </div>
   </div>`;
 }
 
@@ -3537,6 +3594,83 @@ async function toggleShare() {
   render();
 }
 
+/* ------------------------------ publish actions -------------------------- */
+
+function togglePublish() {
+  const p = currentProject();
+  if (!p) return;
+  state.publishOpen = !state.publishOpen;
+  if (state.publishOpen) {
+    state.publishResult = null;
+    state.publishError = null;
+    state.publishDraft = {
+      name: slugify(p.id || p.title || 'project'),
+      owner: (state.identity && state.identity.ghLogin) || '',
+      visibility: 'private',
+      description: p.title || '',
+    };
+  }
+  render();
+}
+
+function publishErr(r) {
+  if (!r) return 'unknown';
+  switch (r.code) {
+    case 'gh_missing':
+      return '未安裝 gh CLI（安裝：winget install GitHub.cli）';
+    case 'gh_not_authed':
+      return 'gh 未登入（請先執行 gh auth login）';
+    case 'bad_name':
+    case 'bad_owner':
+    case 'repo_exists':
+    case 'already_bound':
+    case 'offline':
+      return r.error || r.code;
+    default:
+      return r.error || r.code || '失敗';
+  }
+}
+
+async function doPublish() {
+  const p = currentProject();
+  if (!p) return;
+  try {
+    window.__pcPub = { phase: 'enter', pid: p.id };
+  } catch (_) {}
+  const draft = state.publishDraft || {};
+  const name = String(draft.name != null ? draft.name : ((document.querySelector('[data-pub-name]') || {}).value || '')).trim();
+  const owner = String(draft.owner != null ? draft.owner : ((document.querySelector('[data-pub-owner]') || {}).value || '')).trim();
+  const desc = String(draft.description != null ? draft.description : ((document.querySelector('[data-pub-desc]') || {}).value || '')).trim();
+  const visibility = draft.visibility || ((document.querySelector('input[name="pubvis"]:checked') || {}).value || 'private');
+  const g = state.git[p.id];
+  const rebind = !!(g && g.isRepo && g.remote);
+  state.publishBusy = true;
+  state.publishError = null;
+  render();
+  try {
+    const r = await window.api.publishProject(p.id, { name, owner, visibility, description: desc, rebind });
+    try {
+      window.__pcPub = { name, owner, visibility, rebind, r };
+    } catch (_) {}
+    if (r && r.ok) {
+      state.publishResult = r;
+      toast('已發佈：' + (r.url || ''));
+      const pl = await window.api.refresh();
+      applyPayload(pl);
+      await loadGitStatus(p.id);
+    } else {
+      state.publishError = publishErr(r);
+      toast('發佈失敗：' + state.publishError);
+    }
+  } catch (err) {
+    state.publishError = err.message;
+    toast('發佈失敗：' + err.message);
+  } finally {
+    state.publishBusy = false;
+    render();
+  }
+}
+
 function shareErrMsg(r) {
   if (!r) return '失敗：unknown';
   if (r.code === 'gh_missing') return '未安裝 gh CLI（winget install GitHub.cli）';
@@ -3950,6 +4084,10 @@ function selectProject(id) {
   state.backups = []; // list is per-project; never show another project's snapshots
   state.shareOpen = false;
   state.share = null;
+  state.publishOpen = false;
+  state.publishResult = null;
+  state.publishError = null;
+  state.publishDraft = null;
   state.history = [];
   state.selectedCommit = null;
   state.diff = null;
@@ -4072,6 +4210,22 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-share-invite]')) return doShareInvite();
   const srm = e.target.closest('[data-share-remove]');
   if (srm) return doShareRemove(srm.getAttribute('data-share-remove'));
+  // Publish to GitHub
+  if (e.target.closest('[data-publish-toggle]')) return togglePublish();
+  if (e.target.closest('[data-publish-go]')) {
+    try {
+      window.__pcPubClicks = (window.__pcPubClicks || 0) + 1;
+    } catch (_) {}
+    return doPublish();
+  }
+  if (e.target.closest('[data-publish-cancel]')) {
+    state.publishOpen = false;
+    state.publishResult = null;
+    state.publishError = null;
+    state.publishDraft = null;
+    render();
+    return;
+  }
   // P4: history
   if (e.target.closest('[data-history-refresh]')) {
     const p = currentProject();
@@ -4459,6 +4613,17 @@ document.addEventListener('change', async (e) => {
   } finally {
     cb.disabled = false;
   }
+});
+
+// Keep the publish form's draft in state so periodic re-renders don't wipe it.
+document.addEventListener('input', (e) => {
+  const d = state.publishDraft;
+  if (!d || !e.target || !e.target.matches) return;
+  const t = e.target;
+  if (t.matches('[data-pub-name]')) d.name = t.value;
+  else if (t.matches('[data-pub-owner]')) d.owner = t.value;
+  else if (t.matches('[data-pub-desc]')) d.description = t.value;
+  else if (t.matches('input[name="pubvis"]')) d.visibility = t.value;
 });
 
 const refreshBtn = document.getElementById('refresh-btn');
