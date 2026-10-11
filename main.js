@@ -43,6 +43,7 @@ const {
   readBinding,
   validateCloneUrl,
 } = require('./data');
+const gitx = require('./gitx');
 
 app.setName('Project Console');
 if (process.platform === 'win32') app.setAppUserModelId('com.jack.projectconsole');
@@ -363,9 +364,59 @@ ipcMain.handle('git:bind', async (_e, a = {}) => {
   return r;
 });
 ipcMain.handle('git:sync', async (_e, a = {}) => {
-  const r = await gitSync(dataRoots, a.projectId, a.opts || {});
+  const r = await gitx.syncProject(dataRoots, a.projectId, a.opts || {});
   if (r.ok) broadcast('git');
-  else console.warn('[project-console] gitSync failed:', r.error);
+  else if (!r.needsResolution) console.warn('[project-console] gitSync failed:', r.error);
+  return r;
+});
+
+/* -------- P3: share & permissions ---------------------------------------- */
+
+ipcMain.handle('share:info', (_e, a = {}) => gitx.shareInfo(dataRoots, a.projectId));
+ipcMain.handle('share:access', (_e, a = {}) => gitx.checkAccess(dataRoots, a.projectId));
+ipcMain.handle('share:invite', async (_e, a = {}) => {
+  const r = await gitx.inviteCollaborator(dataRoots, a.projectId, a.user, a.permission);
+  if (r.ok) broadcast('share');
+  else console.warn('[project-console] invite failed:', r.error);
+  return r;
+});
+ipcMain.handle('share:remove', async (_e, a = {}) => {
+  const r = await gitx.removeCollaborator(dataRoots, a.projectId, a.user);
+  if (r.ok) broadcast('share');
+  else console.warn('[project-console] remove failed:', r.error);
+  return r;
+});
+
+/* -------- P4: project history -------------------------------------------- */
+
+ipcMain.handle('history:log', (_e, a = {}) => gitx.historyLog(dataRoots, a.projectId, a.opts));
+ipcMain.handle('history:diff', (_e, a = {}) => gitx.commitDiff(dataRoots, a.projectId, a.sha));
+ipcMain.handle('history:restore', async (_e, a = {}) => {
+  const r = await gitx.restoreCommit(dataRoots, a.projectId, a.sha);
+  if (r.ok) broadcast('git');
+  else console.warn('[project-console] restoreCommit failed:', r.error);
+  return r;
+});
+
+/* -------- P5: identity / my-day ------------------------------------------ */
+
+ipcMain.handle('app:identity', () => gitx.identity());
+ipcMain.handle('myday:collect', (_e, a = {}) => {
+  const payload = scanRoots(dataRoots);
+  return gitx.collectMyTasks(payload.projects, (a && a.who) || '', a && a.today);
+});
+
+/* -------- P6: merge / conflict ------------------------------------------- */
+
+ipcMain.handle('git:integrate', async (_e, a = {}) => {
+  const r = await gitx.integrateRemote(dataRoots, a.projectId, {});
+  if (r.ok && !r.needsResolution) broadcast('git');
+  return r;
+});
+ipcMain.handle('git:resolve', async (_e, a = {}) => {
+  const r = await gitx.resolveMerge(dataRoots, a.projectId, a.choices);
+  if (r.ok) broadcast('git');
+  else console.warn('[project-console] resolve failed:', r.error);
   return r;
 });
 

@@ -13,6 +13,7 @@ const TABS = [
   ['wbs', 'WBS'],
   ['progress', '進度'],
   ['gantt', '甘特'],
+  ['history', '歷程'],
 ];
 
 const state = {
@@ -74,6 +75,25 @@ const state = {
   gitBindOpen: false, // project toolbar: bind-remote form
   gitCloneOpen: false, // dashboard: 加入 Git 專案 form
   gitCloneBusy: false,
+  // P3: share & permissions
+  shareOpen: false,
+  share: null, // shareInfo result for the current project
+  shareBusy: false,
+  readonly: {}, // projectId -> true when the user lacks push rights
+  // P4: project history
+  history: [], // commit list
+  historyBusy: false,
+  selectedCommit: null, // sha
+  diff: null, // { commit, changes } for the selected commit
+  diffBusy: false,
+  // P5: my-day + identity
+  me: '', // task owner name ("我是誰")
+  meSaved: '', // persisted value (to detect edits)
+  myday: null,
+  identity: { gitUser: null, ghLogin: null },
+  // P6: conflict resolution
+  conflicts: null, // array of conflicts awaiting a choice
+  conflictBusy: false,
 };
 
 const RAG_RANK = { red: 3, amber: 2, green: 1, grey: 0 };
@@ -296,10 +316,11 @@ function ragChip(rag) {
 }
 
 function tickBox(projectId, task, extraClass) {
-  return `<label class="tick${extraClass ? ' ' + extraClass : ''}">
+  const ro = !!state.readonly[projectId];
+  return `<label class="tick${extraClass ? ' ' + extraClass : ''}${ro ? ' is-disabled' : ''}"${ro ? ' title="唯讀：你冇修改權限"' : ''}>
     <input type="checkbox" data-tick data-project="${esc(projectId)}" data-task="${esc(
     task.id
-  )}"${task.done ? ' checked' : ''}>
+  )}"${task.done ? ' checked' : ''}${ro ? ' disabled' : ''}>
     <span class="tick__box"></span>
   </label>`;
 }
@@ -331,7 +352,8 @@ function render() {
     pv.hidden = true;
     pv.innerHTML = '';
     landing.hidden = false;
-    landing.innerHTML = state.topView === 'roadmap' ? renderRoadmap() : renderDashboard();
+    landing.innerHTML =
+      state.topView === 'roadmap' ? renderRoadmap() : state.topView === 'myday' ? renderMyDay() : renderDashboard();
     applyDynamicWidths(landing);
     applyRoadmapPositions();
   }
@@ -354,6 +376,8 @@ function renderTopbar() {
   if (db) db.classList.toggle('is-on', !state.selectedProjectId && state.topView === 'dashboard');
   const rb = document.getElementById('roadmap-btn');
   if (rb) rb.classList.toggle('is-on', !state.selectedProjectId && state.topView === 'roadmap');
+  const mb = document.getElementById('myday-btn');
+  if (mb) mb.classList.toggle('is-on', !state.selectedProjectId && state.topView === 'myday');
 }
 
 function renderToolbar() {
@@ -675,6 +699,7 @@ function applyRoadmapPositions() {
 
 function renderProject(p) {
   const s = p.summary;
+  const ro = !!state.readonly[p.id];
   const tabs = TABS.map(
     ([id, label]) =>
       `<button class="tab${state.view === id ? ' is-active' : ''}" type="button" data-view="${id}">${label}</button>`
@@ -684,10 +709,11 @@ function renderProject(p) {
   if (state.view === 'wbs') body = renderWBS(p);
   else if (state.view === 'progress') body = renderProgress(p);
   else if (state.view === 'gantt') body = renderGanttTab(p);
+  else if (state.view === 'history') body = renderHistory(p);
   else body = renderOverview(p);
 
   return `
-    <div class="project">
+    <div class="project${ro ? ' is-readonly' : ''}">
       <div class="proj-toolbar">
         <span class="dot dot--${s.rag}"></span>
         <span class="ptb__id">${esc(p.id)}</span>
@@ -699,12 +725,14 @@ function renderProject(p) {
         </span>
         <span class="ptb__spacer"></span>
         ${syncChipHtml(p.id)}
-        <button class="btn btn--ghost" type="button" data-git-sync title="Pull → 自動 commit → Push（git sync）">Sync</button>
+        ${readonlyChipHtml(p.id)}
+        <button class="btn btn--ghost" type="button" data-git-sync title="Pull → 自動 commit → Push（git sync）"${ro ? ' disabled' : ''}>Sync</button>
+        <button class="btn btn--ghost${state.shareOpen ? ' is-on' : ''}" type="button" data-share-toggle title="分享 / 協作者權限（Share）">分享</button>
         <button class="btn btn--ghost${state.gitBindOpen ? ' is-on' : ''}" type="button" data-git-bind title="綁定 / 更換 git remote">Git…</button>
-        <button class="btn" type="button" data-add-task title="新增任務 (n)">＋任務</button>
-        <button class="btn btn--ghost" type="button" data-reschedule title="依 deps 重排 start">重排</button>
+        <button class="btn" type="button" data-add-task title="新增任務 (n)"${ro ? ' disabled' : ''}>＋任務</button>
+        <button class="btn btn--ghost" type="button" data-reschedule title="依 deps 重排 start"${ro ? ' disabled' : ''}>重排</button>
         <button class="btn btn--ghost${state.showCritical ? ' is-on' : ''}" type="button" data-toggle-critical title="關鍵路徑標示">關鍵</button>
-        <button class="btn btn--ghost${state.showBaseline ? ' is-on' : ''}" type="button" data-toggle-baseline title="凍結／顯示基準線（baseline ghost bar）">基準線</button>
+        <button class="btn btn--ghost${state.showBaseline ? ' is-on' : ''}" type="button" data-toggle-baseline title="凍結／顯示基準線（baseline ghost bar）"${ro ? ' disabled' : ''}>基準線</button>
         <button class="btn btn--ghost${state.exportMenu ? ' is-on' : ''}" type="button" data-export-toggle title="匯出（PNG / PDF / CSV / Markdown）">匯出</button>
         <button class="btn btn--ghost${state.showBackups ? ' is-on' : ''}" type="button" data-show-backups title="備份清單 / 還原">備份</button>
         <button class="btn btn--ghost${state.menuOpen ? ' is-on' : ''}" type="button" data-menu-toggle title="更多動作（同步 / 匯入 / 凍結）">⋯</button>
@@ -712,6 +740,9 @@ function renderProject(p) {
       ${state.exportMenu ? renderExportMenu() : ''}
       ${state.menuOpen ? renderOverflowMenu(p) : ''}
       ${state.gitBindOpen ? renderGitBindForm() : ''}
+      ${state.shareOpen ? renderSharePanel(p) : ''}
+      ${state.conflicts ? renderConflictPanel(p) : ''}
+      ${ro ? readonlyBanner() : ''}
       <nav class="tabs">${tabs}</nav>
       ${state.showBackups ? renderBackups(p) : ''}
       ${body}
@@ -796,6 +827,282 @@ function renderGitClonePanel() {
     <button class="btn" type="button" data-git-clone-go${state.gitCloneBusy ? ' disabled' : ''}>${state.gitCloneBusy ? 'Clone 中…' : 'Clone'}</button>
     <button class="btn btn--ghost" type="button" data-git-clone-cancel>取消</button>
     <span class="note">clone 後會自動開啟該專案。</span>
+  </div>`;
+}
+
+/* ------------------------------ P3: share panel -------------------------- */
+
+function readonlyChipHtml(pid) {
+  if (!state.readonly[pid]) return '';
+  return `<span class="rochip" title="你冇 push 權限；app 已切換唯讀">唯讀（你冇修改權限）</span>`;
+}
+
+function readonlyBanner() {
+  return `<div class="robanner">唯讀模式：你對呢個 repo 冇修改（push）權限，所以打勾 / 編輯 / 還原 / Sync 已停用。想改 → 叫 repo owner 喺「分享」加你做 collaborator（write）。</div>`;
+}
+
+function permChinese(p) {
+  return p === 'ADMIN' ? '管理員' : p === 'WRITE' ? '可寫' : p === 'READ' ? '唯讀' : p === 'MAINTAIN' ? '維護' : '未知';
+}
+
+function renderSharePanel(p) {
+  const sh = state.share;
+  const bar = `<div class="panelbar"><span class="kicker">分享 · Share</span><span class="panelbar__spacer"></span>
+      <button class="btn btn--ghost" type="button" data-share-refresh>重新載入</button>
+      <button class="btn btn--ghost" type="button" data-share-cancel>關閉</button></div>`;
+  let body;
+  if (state.shareBusy || !sh) {
+    body = '<div class="note">載入中…</div>';
+  } else if (!sh.ok) {
+    const remote = sh.remote ? `<div class="shline"><span class="id">remote</span><span class="mono">${esc(sh.remote)}</span></div>` : '';
+    let hint = esc(sh.error || '未知錯誤');
+    if (sh.code === 'gh_missing') hint = '未安裝 gh CLI。安裝：<code>winget install GitHub.cli</code>';
+    if (sh.code === 'gh_not_authed') hint = 'gh 未登入。請先執行：<code>gh auth login</code>（只有 repo owner / admin 先 invite 到人）';
+    if (sh.code === 'no_remote') hint = '呢個專案未綁定 git remote。先撳上面「Git…」綁定一個 GitHub repo。';
+    if (sh.code === 'not_github') hint = 'remote 唔係 GitHub repo（Share 只支援 GitHub）。';
+    body = `${remote}<div class="note note--alert">${hint}</div>`;
+  } else {
+    const repo = sh.repo || {};
+    const cols = sh.collaborators || [];
+    const invites = sh.invites || [];
+    const myPerm = sh.permission;
+    const canAdmin = myPerm === 'ADMIN';
+    const rows = cols.length
+      ? cols
+          .map(
+            (c) => `<div class="shrow"><span class="id">${esc(c.login)}</span><span class="shrow__perm">${esc(permChinese(c.permission))}</span>
+        <span class="shrow__spacer"></span><button class="btn btn--ghost" type="button" data-share-remove="${esc(c.login)}"${state.readonly[p.id] || !canAdmin ? ' disabled' : ''} title="移除協作者">移除</button></div>`
+          )
+          .join('')
+      : '<div class="empty">未有 collaborator</div>';
+    const invRows = invites.length
+      ? invites.map((i) => `<div class="shrow"><span class="id">${esc(i.login)}</span><span class="shrow__perm">待接受 · ${esc(permChinese(i.permission))}</span></div>`).join('')
+      : '';
+    body = `
+      <div class="shline"><span class="kicker">repo</span><span class="id">${esc(repo.full || '')}</span>
+        <span class="shpill">${repo.private ? 'private' : 'public'}</span>
+        <a class="shlink" href="${esc(repo.url || '#')}" target="_blank" rel="noreferrer">${esc(repo.url || '')}</a></div>
+      <div class="shline"><span class="kicker">你嘅權限</span><span class="shrow__perm">${esc(permChinese(myPerm))}</span>${sh.readOnly ? '<span class="rochip">唯讀</span>' : ''}</div>
+      ${state.readonly[p.id] ? readonlyBanner() : ''}
+      <div class="section__head"><h3 class="section__title">協作者</h3><span class="section__note">${cols.length}</span></div>
+      <div class="shlist">${rows}</div>
+      ${invRows ? `<div class="section__head"><h3 class="section__title">待接受邀請</h3><span class="section__note">${invites.length}</span></div><div class="shlist">${invRows}</div>` : ''}
+      <div class="shinvite">
+        <span class="kicker">邀請</span>
+        <input class="fin" type="text" data-share-user placeholder="GitHub username">
+        <select class="fsel" data-share-perm><option value="push">可寫（write）</option><option value="pull">唯讀（read-only）</option></select>
+        <button class="btn" type="button" data-share-invite${state.shareBusy ? ' disabled' : ''}>邀請</button>
+        ${!canAdmin ? '<span class="note">只有 admin 先 invite 到；你可能會收到 403。</span>' : ''}
+      </div>
+      ${(sh.warnings && sh.warnings.length) ? `<div class="note note--warn">${sh.warnings.map(esc).join('；')}</div>` : ''}`;
+  }
+  return `<div class="sharepanel">${bar}${body}</div>`;
+}
+
+/* ------------------------------ P4: history ------------------------------ */
+
+const FIELD_LABEL = {
+  title: '標題',
+  owner: '負責人',
+  start: '開始',
+  estimate_days: '天數',
+  deliverable: '交付物',
+  acceptance: '驗收',
+  deps: '前置任務',
+  outputs: '輸出',
+  phase: '階段',
+  name: '名稱',
+  date: '日期',
+  after: '之後',
+  done: '完成狀態',
+  doneAt: '完成日期',
+  note: '備註',
+  deleted: '刪除 / 修改',
+  plan: '計劃',
+};
+
+function fieldLabel(f) {
+  return FIELD_LABEL[f] || f;
+}
+
+function valueText(v) {
+  if (v == null || v === '') return '—';
+  if (Array.isArray(v)) return v.length ? v.join('、') : '—';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+function relTime(iso) {
+  const d = toDate(iso);
+  if (!d) return '—';
+  const min = Math.round((Date.now() - d.getTime()) / 60000);
+  if (min < 1) return '剛剛';
+  if (min < 60) return min + ' 分鐘前';
+  const h = Math.round(min / 60);
+  if (h < 24) return h + ' 小時前';
+  const day = Math.round(h / 24);
+  if (day < 30) return day + ' 日前';
+  return fmtDate(iso);
+}
+
+function changeLabel(c) {
+  switch (c.kind) {
+    case 'task-add':
+      return `<span class="chg chg--add">＋ ${esc(c.id)}</span> 新增${c.title ? ' 「' + esc(c.title) + '」' : ''}`;
+    case 'task-del':
+      return `<span class="chg chg--del">－ ${esc(c.id)}</span> 刪除${c.title ? '（' + esc(c.title) + '）' : ''}`;
+    case 'task-field':
+      return `<span class="chg chg--edit">${esc(c.id)}</span> ${esc(fieldLabel(c.field))}：<span class="from">${esc(valueText(c.from))}</span> → <span class="to">${esc(valueText(c.to))}</span>`;
+    case 'tick':
+      return `<span class="chg chg--tick">${esc(c.id)}</span> 未完成 → 已完成${c.owner ? ' · ' + esc(c.owner) : ''}`;
+    case 'untick':
+      return `<span class="chg chg--untick">${esc(c.id)}</span> 已完成 → 未完成${c.owner ? ' · ' + esc(c.owner) : ''}`;
+    case 'phase-add':
+      return `<span class="chg chg--add">＋ phase ${esc(c.id)}</span> ${esc(c.name || '')}`;
+    case 'phase-del':
+      return `<span class="chg chg--del">－ phase ${esc(c.id)}</span> ${esc(c.name || '')}`;
+    case 'milestone-add':
+      return `<span class="chg chg--add">＋ milestone ${esc(c.id)}</span> ${esc(c.name || '')}`;
+    case 'milestone-del':
+      return `<span class="chg chg--del">－ milestone ${esc(c.id)}</span> ${esc(c.name || '')}`;
+    default:
+      return esc(JSON.stringify(c));
+  }
+}
+
+function renderDiff() {
+  const d = state.diff;
+  if (!d) return '';
+  const ch = d.changes || [];
+  const c = d.commit || {};
+  const body = ch.length
+    ? ch.map((x) => `<div class="diffrow">${changeLabel(x)}</div>`).join('')
+    : '<div class="empty">此 commit 冇 plan / progress 嘅 task 變化（可能只改咗其他檔）。</div>';
+  return `<div class="diffbox">
+    <div class="section__head"><h3 class="section__title">改動</h3>
+      <span class="section__note">${esc(c.short || '')} · ${esc(c.author || '')} · ${esc(relTime(c.date))} — ${esc(c.message || '')}</span></div>
+    <div class="difflist">${body}</div>
+  </div>`;
+}
+
+function renderHistory(p) {
+  const g = state.git[p.id];
+  const ro = !!state.readonly[p.id];
+  const me = String(state.me || '').toLowerCase();
+  const gitUser = (state.identity && state.identity.gitUser) || '';
+  const commits = state.history || [];
+  const rows = commits.length
+    ? commits
+        .map((c) => {
+          const mine =
+            (me && String(c.author || '').toLowerCase() === me) ||
+            (gitUser && String(c.author || '') === gitUser) ||
+            (state.identity && state.identity.ghLogin && String(c.author || '') === state.identity.ghLogin);
+          const sel = state.selectedCommit === c.sha ? ' is-active' : '';
+          return `<div class="hrow${sel}">
+        <span class="hrow__sha id">${esc(c.short)}</span>
+        <span class="hrow__author">${mine ? '<span class="me-dot" title="你嘅 commit"></span>' : ''}${esc(c.author)}</span>
+        <span class="hrow__time" title="${esc(c.date)}">${esc(relTime(c.date))}</span>
+        <span class="hrow__msg" title="${esc(c.message)}">${esc(c.message)}</span>
+        <button class="btn btn--ghost" type="button" data-history-diff="${esc(c.sha)}">看改動</button>
+        <button class="btn btn--ghost" type="button" data-history-restore="${esc(c.sha)}"${ro ? ' disabled' : ''} title="把 plan / progress 還原到此 commit（可 Undo）">還原</button>
+      </div>`;
+        })
+        .join('')
+    : state.historyBusy
+      ? '<div class="empty">載入中…</div>'
+      : `<div class="empty">${g && !g.isRepo ? '呢個專案唔係 git repo（未 bind / init）。' : '此專案未有 git 歷程。'}</div>`;
+  return `<div class="hrs">
+    <div class="section__head"><h2 class="section__title">專案歷程 · History</h2>
+      <span class="section__note">${commits.length} commits · 最新在上</span>
+      <button class="btn btn--ghost" type="button" data-history-refresh>重新載入</button></div>
+    ${renderDiff()}
+    <div class="hlist">${rows}</div>
+  </div>`;
+}
+
+/* ------------------------------ P5: my-day ------------------------------- */
+
+function renderMyDay() {
+  const md = state.myday;
+  const me = state.me;
+  const dflt = (state.identity && (state.identity.gitUser || state.identity.ghLogin)) || '';
+  const head = `<div class="dash__head">
+      <div><span class="kicker">My Day · 我今日要做</span><h1 class="display">我今日<br />要做</h1></div>
+      <div class="head-controls">
+        <span class="kicker">我是誰</span>
+        <input class="fin" type="text" data-me-input value="${esc(me)}" placeholder="task owner 名（例如 Jack）">
+        <button class="btn" type="button" data-me-save>儲存</button>
+        ${!me && dflt ? `<button class="btn btn--ghost" type="button" data-me-use="${esc(dflt)}">用 ${esc(dflt)}</button>` : ''}
+      </div>
+    </div>`;
+  if (!me) {
+    return `<div class="dash">${head}<div class="empty">未設定「我是誰」。輸入你嘅 task owner 名（例如 Jack），撳「儲存」，就會顯示你嘅任務${dflt ? '（或者撳「用 ' + esc(dflt) + '」）' : ''}。</div></div>`;
+  }
+  if (!md) return `<div class="dash">${head}<div class="empty">載入中…</div></div>`;
+  const grp = (title, items, alert) => `<section class="dash__list"><div class="section__head"><h2 class="section__title">${esc(title)}</h2><span class="section__note">${items.length}</span></div>${
+    items.length
+      ? items
+          .map(
+            (it) => `<button class="drow" type="button" data-jump-project="${esc(it.projectId)}" data-jump-task="${esc(it.taskId)}">
+      <span class="drow__date${alert ? ' is-alert' : ''}">${esc(it.plannedEnd || '—')}</span>
+      <span class="drow__id">${esc(it.taskId)}</span>
+      <span class="drow__title" title="${esc(it.title)}">${esc(it.title)}</span>
+      <span class="drow__proj">${esc(it.projectId)}</span></button>`
+          )
+          .join('')
+      : '<div class="empty">無</div>'
+  }</section>`;
+  return `<div class="dash">
+    ${head}
+    <div class="dash__stats">${dstat('我嘅未完成', md.count || 0)}${dstat('逾期', (md.overdue || []).length, (md.overdue || []).length > 0)}${dstat('今日', (md.today || []).length)}${dstat('本週', (md.week || []).length)}</div>
+    <div class="dash__lists">
+      ${grp('逾期', md.overdue || [], true)}
+      ${grp('今日 due', md.today || [], false)}
+      ${grp('本週 due (≤7日)', md.week || [], false)}
+      ${grp('下一個 ready', md.ready || [], false)}
+    </div>
+  </div>`;
+}
+
+/* ------------------------------ P6: conflict UI -------------------------- */
+
+function conflictFieldLabel(c) {
+  if (c.field === 'deleted') return '刪除 vs 修改';
+  const scope = c.scope === 'meta' ? '專案' : c.scope === 'task' ? '任務' : c.scope === 'phase' ? '階段' : c.scope === 'milestone' ? 'Milestone' : c.scope === 'progress' ? '進度' : '';
+  return `${scope} ${fieldLabel(c.field)}`;
+}
+
+function renderConflictPanel(p) {
+  const list = state.conflicts || [];
+  const rows = list
+    .map((c, i) => {
+      const key = `${c.scope}:${c.id}:${c.field}`;
+      return `<div class="crow" data-conflict-key="${esc(key)}">
+      <div class="crow__head"><span class="id">${esc(c.id)}</span><span class="crow__field">${esc(conflictFieldLabel(c))}</span></div>
+      <div class="crow__sides">
+        <span class="crow__side crow__side--ours">本地：<b>${esc(valueText(c.ours))}</b></span>
+        <span class="crow__side crow__side--theirs">對方：<b>${esc(valueText(c.theirs))}</b></span>
+        ${c.base != null ? `<span class="crow__base">原始：${esc(valueText(c.base))}</span>` : ''}
+      </div>
+      <div class="crow__choice">
+        <label><input type="radio" name="cf-${i}" value="ours" checked> 揀本地</label>
+        <label><input type="radio" name="cf-${i}" value="theirs"> 揀對方</label>
+        <label><input type="radio" name="cf-${i}" value="merge"> 合併</label>
+      </div>
+    </div>`;
+    })
+    .join('');
+  return `<div class="conflictpanel">
+    <div class="panelbar"><span class="kicker">衝突 · Conflict</span><span class="panelbar__spacer"></span>
+      <button class="btn btn--ghost" type="button" data-conflict-cancel>取消（唔改）</button></div>
+    <div class="note note--alert">pull 時同遠端撞咗 ${list.length} 個位（同一個 task / 同一欄位）。兩邊資料都保留喺 git 歷程，唔會冇咗。揀完再撳「套用並合併」。</div>
+    <div class="clist">${rows}</div>
+    <div class="panelops">
+      <button class="btn" type="button" data-conflict-apply${state.conflictBusy ? ' disabled' : ''}>${state.conflictBusy ? '處理中…' : '套用並合併'}</button>
+      <button class="btn btn--ghost" type="button" data-conflict-all-ours>全部揀本地</button>
+      <button class="btn btn--ghost" type="button" data-conflict-all-theirs>全部揀對方</button>
+    </div>
   </div>`;
 }
 
@@ -1911,7 +2218,9 @@ function loadUI() {
     const pw = parseFloat(localStorage.getItem('pc.panelWidth'));
     if (Number.isFinite(pw)) state.panelWidth = clamp(pw, 320, 720);
     const tv = localStorage.getItem('pc.topView');
-    if (tv === 'dashboard' || tv === 'roadmap') state.topView = tv;
+    if (tv === 'dashboard' || tv === 'roadmap' || tv === 'myday') state.topView = tv;
+    const meLS = localStorage.getItem('pc.me');
+    if (typeof meLS === 'string') state.me = meLS;
     const so = localStorage.getItem('pc.sort');
     if (['name', 'rag', 'target', 'progress'].includes(so)) state.sort = so;
     state.pins = JSON.parse(localStorage.getItem('pc.pins') || '{}') || {};
@@ -3123,20 +3432,29 @@ async function doGitBind() {
 async function doSync() {
   const p = currentProject();
   if (!p) return;
+  if (state.readonly[p.id]) {
+    toast('唯讀：你冇修改權限');
+    return;
+  }
   if (state.gitBusy[p.id]) return;
   state.gitBusy[p.id] = true;
+  state.conflicts = null;
   render();
   try {
     const r = await window.api.gitSync(p.id, {});
-    if (r && r.ok) {
+    if (r && r.needsResolution && r.conflicts && r.conflicts.length) {
+      state.conflicts = r.conflicts;
+      toast('有 ' + r.conflicts.length + ' 個衝突待處理（見下方）');
+    } else if (r && r.ok) {
       const bits = [];
-      if (r.pulled) bits.push('已 pull');
-      if (r.committed) bits.push(r.message ? '已 commit「' + r.message + '」' : '已 commit');
-      else bits.push('無新改動');
+      if (r.committed) bits.push(r.message ? 'commit「' + r.message + '」' : 'commit');
+      if (r.merged) bits.push('已合併遠端');
+      else if (r.pulled) bits.push('已 pull');
       if (r.pushed) bits.push('已 push');
+      else if (!r.committed) bits.push('無新改動');
       toast('Sync 完成 · ' + bits.join(' · '));
     } else {
-      toast('Sync 失敗' + (r && r.phase ? '（' + r.phase + '）' : '') + '：' + ((r && r.error) || ''));
+      toast(syncErrorMsg(r));
     }
   } catch (err) {
     toast('Sync 失敗：' + err.message);
@@ -3149,8 +3467,18 @@ async function doSync() {
       /* refresh is best-effort */
     }
     await loadGitStatus(p.id);
+    if (state.view === 'history') await loadHistory(p.id);
     render();
   }
+}
+
+function syncErrorMsg(r) {
+  if (!r) return 'Sync 失敗';
+  if (r.code === 'offline') return 'Sync 失敗：連唔到 remote（offline）— 檢查網絡後再試';
+  if (r.rejected) return 'Sync 失敗：push 被拒（remote 有新 commit）— 再撳 Sync 佢會先 pull';
+  if (r.phase === 'push' && /permission|denied|403|forbidden/i.test(r.error || '')) return 'Sync 失敗：冇 push 權限（唯讀）';
+  if (r.phase === 'merge') return 'Sync：有衝突待處理';
+  return 'Sync 失敗' + (r.phase ? '（' + r.phase + '）' : '') + '：' + (r.error || 'unknown');
 }
 
 async function doGitClone() {
@@ -3179,6 +3507,246 @@ async function doGitClone() {
     toast('Clone 失敗：' + err.message);
   } finally {
     state.gitCloneBusy = false;
+    render();
+  }
+}
+
+/* ------------------------------ P3: share actions ------------------------ */
+
+async function loadShare(pid) {
+  if (!pid) return;
+  state.shareBusy = true;
+  if (state.shareOpen) render();
+  try {
+    state.share = await window.api.shareInfo(pid);
+  } catch (err) {
+    state.share = { ok: false, code: 'error', error: err.message };
+  } finally {
+    state.shareBusy = false;
+  }
+  if (state.share && state.share.readOnly) state.readonly[pid] = true;
+  render();
+}
+
+async function toggleShare() {
+  const p = currentProject();
+  if (!p) return;
+  state.shareOpen = !state.shareOpen;
+  if (state.shareOpen) await loadShare(p.id);
+  else state.share = null;
+  render();
+}
+
+function shareErrMsg(r) {
+  if (!r) return '失敗：unknown';
+  if (r.code === 'gh_missing') return '未安裝 gh CLI（winget install GitHub.cli）';
+  if (r.code === 'gh_not_authed') return 'gh 未登入（請先 gh auth login）';
+  if (r.code === 'no_admin') return '冇 admin 權限（只有 repo owner / admin 先 invite 到）';
+  return '失敗：' + (r.error || r.code || '');
+}
+
+async function doShareInvite() {
+  const p = currentProject();
+  if (!p) return;
+  const u = ((document.querySelector('[data-share-user]') || {}).value || '').trim();
+  const perm = (document.querySelector('[data-share-perm]') || {}).value || 'push';
+  if (!u) {
+    toast('請輸入 GitHub username');
+    return;
+  }
+  state.shareBusy = true;
+  render();
+  try {
+    const r = await window.api.shareInvite(p.id, u, perm);
+    toast(r && r.ok ? '已邀請 ' + u + '（' + (perm === 'pull' ? '唯讀' : '可寫') + '）' : shareErrMsg(r));
+  } catch (err) {
+    toast('邀請失敗：' + err.message);
+  } finally {
+    state.shareBusy = false;
+    await loadShare(p.id);
+  }
+}
+
+async function doShareRemove(login) {
+  const p = currentProject();
+  if (!p) return;
+  const go = await confirmDialog('移除協作者 ' + login + '？');
+  if (!go) return;
+  state.shareBusy = true;
+  render();
+  try {
+    const r = await window.api.shareRemove(p.id, login);
+    toast(r && r.ok ? '已移除 ' + login : shareErrMsg(r));
+  } catch (err) {
+    toast('移除失敗：' + err.message);
+  } finally {
+    state.shareBusy = false;
+    await loadShare(p.id);
+  }
+}
+
+/** Lightweight read-only detection (gh permission, else dry-run push). */
+async function loadAccess(pid) {
+  if (!pid) return;
+  try {
+    const r = await window.api.shareAccess(pid);
+    if (r && r.ok) {
+      if (r.readOnly) state.readonly[pid] = true;
+      else delete state.readonly[pid];
+      render();
+    }
+  } catch (_) {
+    /* best effort */
+  }
+}
+
+/* ------------------------------ P4: history actions ---------------------- */
+
+async function loadHistory(pid) {
+  if (!pid) return;
+  state.historyBusy = true;
+  render();
+  try {
+    const r = await window.api.historyLog(pid, { limit: 100 });
+    state.history = (r && r.ok && r.commits) || [];
+    if (r && !r.ok) toast('載入歷程失敗：' + (r.error || ''));
+  } catch (err) {
+    state.history = [];
+    toast('載入歷程失敗：' + err.message);
+  } finally {
+    state.historyBusy = false;
+    render();
+  }
+}
+
+async function loadDiff(sha) {
+  const p = currentProject();
+  if (!p) return;
+  state.diffBusy = true;
+  state.selectedCommit = sha;
+  render();
+  try {
+    const r = await window.api.historyDiff(p.id, sha);
+    if (r && r.ok) state.diff = r;
+    else {
+      state.diff = null;
+      toast('讀改動失敗：' + ((r && r.error) || ''));
+    }
+  } catch (err) {
+    state.diff = null;
+    toast('讀改動失敗：' + err.message);
+  } finally {
+    state.diffBusy = false;
+    render();
+  }
+}
+
+async function doRestoreCommit(sha) {
+  const p = currentProject();
+  if (!p) return;
+  if (state.readonly[p.id]) {
+    toast('唯讀：你冇修改權限');
+    return;
+  }
+  const c = (state.history || []).find((x) => x.sha === sha);
+  const short = (c && c.short) || String(sha).slice(0, 7);
+  const go = await confirmDialog('還原 plan.json + progress.json 到 commit ' + short + '？（現狀會備份，仲可以 Undo）');
+  if (!go) return;
+  state.historyBusy = true;
+  render();
+  try {
+    const r = await window.api.historyRestore(p.id, sha);
+    if (r && r.ok) {
+      if (r.undo) recordOp(r, p.id, '還原 commit ' + short);
+      toast('已還原到 ' + short + '（' + (r.restored || []).join(' + ') + '）');
+      const pl = await window.api.refresh();
+      applyPayload(pl);
+      await loadHistory(p.id);
+    } else {
+      toast('還原失敗：' + ((r && r.error) || ''));
+    }
+  } catch (err) {
+    toast('還原失敗：' + err.message);
+  } finally {
+    state.historyBusy = false;
+    render();
+  }
+}
+
+/* ------------------------------ P5: my-day actions ----------------------- */
+
+async function loadMyDay() {
+  const who = state.me;
+  if (!who) {
+    state.myday = null;
+    if (state.topView === 'myday' && !state.selectedProjectId) render();
+    return;
+  }
+  try {
+    state.myday = await window.api.myday(who, hkTodayStrClient());
+  } catch (_) {
+    state.myday = { overdue: [], today: [], week: [], ready: [], count: 0 };
+  }
+  if (state.topView === 'myday' && !state.selectedProjectId) render();
+}
+
+function setMe(v) {
+  state.me = v;
+  persist('pc.me', v);
+  loadMyDay();
+}
+
+async function loadIdentity() {
+  try {
+    const id = await window.api.identity();
+    if (id && id.ok) state.identity = id;
+    if (!state.me) {
+      const dflt = (id && (id.gitUser || id.ghLogin)) || '';
+      if (dflt) {
+        state.me = dflt;
+        persist('pc.me', dflt);
+      }
+    }
+  } catch (_) {
+    /* optional */
+  }
+  if (state.topView === 'myday') loadMyDay();
+}
+
+/* ------------------------------ P6: conflict actions --------------------- */
+
+function setAllConflicts(choice) {
+  (state.conflicts || []).forEach((_, i) => {
+    const el = document.querySelector(`input[name="cf-${i}"][value="${choice}"]`);
+    if (el) el.checked = true;
+  });
+}
+
+async function doResolveConflicts() {
+  const p = currentProject();
+  if (!p || !state.conflicts) return;
+  const choices = state.conflicts.map((c, i) => {
+    const el = document.querySelector(`input[name="cf-${i}"]:checked`);
+    return { scope: c.scope, id: c.id, field: c.field, choice: el ? el.value : 'ours' };
+  });
+  state.conflictBusy = true;
+  render();
+  try {
+    const r = await window.api.gitResolve(p.id, choices);
+    if (r && r.ok) {
+      state.conflicts = null;
+      const push = await window.api.gitPush(p.id);
+      toast(push && push.ok ? '已合併並 push 到 remote' : '已合併（local），push 未成功：' + ((push && push.error) || ''));
+      const pl = await window.api.refresh();
+      applyPayload(pl);
+      await loadGitStatus(p.id);
+    } else {
+      toast('合併失敗' + (r && r.phase ? '（' + r.phase + '）' : '') + '：' + ((r && r.error) || ''));
+    }
+  } catch (err) {
+    toast('合併失敗：' + err.message);
+  } finally {
+    state.conflictBusy = false;
     render();
   }
 }
@@ -3380,10 +3948,18 @@ function selectProject(id) {
   state.baseline = null;
   state.addingTask = null;
   state.backups = []; // list is per-project; never show another project's snapshots
+  state.shareOpen = false;
+  state.share = null;
+  state.history = [];
+  state.selectedCommit = null;
+  state.diff = null;
+  state.conflicts = null;
   persist(LS.project, id);
   render();
   loadBaselineFor(id);
   loadGitStatus(id).then(render);
+  loadAccess(id);
+  if (state.view === 'history') loadHistory(id);
   if (state.showBackups) loadBackupList(id).then(render);
   const main = document.getElementById('main');
   if (main) main.scrollTop = 0;
@@ -3478,6 +4054,59 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-git-clone-cancel]')) {
     state.gitCloneOpen = false;
     render();
+    return;
+  }
+  // P3: share & permissions
+  if (e.target.closest('[data-share-toggle]')) return toggleShare();
+  if (e.target.closest('[data-share-cancel]')) {
+    state.shareOpen = false;
+    state.share = null;
+    render();
+    return;
+  }
+  if (e.target.closest('[data-share-refresh]')) {
+    const p = currentProject();
+    if (p) loadShare(p.id);
+    return;
+  }
+  if (e.target.closest('[data-share-invite]')) return doShareInvite();
+  const srm = e.target.closest('[data-share-remove]');
+  if (srm) return doShareRemove(srm.getAttribute('data-share-remove'));
+  // P4: history
+  if (e.target.closest('[data-history-refresh]')) {
+    const p = currentProject();
+    if (p) loadHistory(p.id);
+    return;
+  }
+  const hd = e.target.closest('[data-history-diff]');
+  if (hd) return loadDiff(hd.getAttribute('data-history-diff'));
+  const hr = e.target.closest('[data-history-restore]');
+  if (hr) return doRestoreCommit(hr.getAttribute('data-history-restore'));
+  // P5: identity
+  if (e.target.closest('[data-me-save]')) {
+    const el = document.querySelector('[data-me-input]');
+    setMe(el ? el.value.trim() : '');
+    toast('已設定「我是誰」');
+    return;
+  }
+  const mu = e.target.closest('[data-me-use]');
+  if (mu) {
+    setMe(mu.getAttribute('data-me-use'));
+    return;
+  }
+  // P6: conflicts
+  if (e.target.closest('[data-conflict-apply]')) return doResolveConflicts();
+  if (e.target.closest('[data-conflict-cancel]')) {
+    state.conflicts = null;
+    render();
+    return;
+  }
+  if (e.target.closest('[data-conflict-all-ours]')) {
+    setAllConflicts('ours');
+    return;
+  }
+  if (e.target.closest('[data-conflict-all-theirs]')) {
+    setAllConflicts('theirs');
     return;
   }
   if (e.target.closest('#rail-reset')) {
@@ -3708,6 +4337,8 @@ document.addEventListener('click', (e) => {
     state.view = tab.getAttribute('data-view');
     persist(LS.view, state.view);
     render();
+    const p = currentProject();
+    if (state.view === 'history' && p) loadHistory(p.id);
     const main = document.getElementById('main');
     if (main) main.scrollTop = 0; // every view switch starts at the top (no half-hidden rows)
     return;
@@ -3806,6 +4437,11 @@ document.addEventListener('change', async (e) => {
   const projectId = cb.getAttribute('data-project');
   const taskId = cb.getAttribute('data-task');
   const done = cb.checked;
+  if (state.readonly[projectId]) {
+    cb.checked = !done;
+    toast('唯讀：你冇修改權限');
+    return;
+  }
   cb.disabled = true;
   try {
     const res = await window.api.setTaskDone(projectId, taskId, done);
@@ -3856,6 +4492,7 @@ function applyPayload(payload) {
     state.selectedTaskId = null;
   }
   render();
+  if (state.topView === 'myday' && state.me && !state.selectedProjectId) loadMyDay();
 }
 
 function showUpdated() {
@@ -3925,11 +4562,15 @@ async function init() {
   try {
     const payload = await window.api.getProjects();
     applyPayload(payload);
-    if (state.selectedProjectId) loadGitStatus(state.selectedProjectId).then(render);
+    if (state.selectedProjectId) {
+      loadGitStatus(state.selectedProjectId).then(render);
+      loadAccess(state.selectedProjectId);
+    }
   } catch (err) {
     const l = document.getElementById('landing');
     if (l) l.innerHTML = '<div class="empty">讀取失敗: ' + esc(err.message) + '</div>';
   }
+  loadIdentity();
 }
 
 init();

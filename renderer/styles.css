@@ -2604,3 +2604,130 @@ html.print-export .wbs-canvas { transform-origin: top left; }
 .gitclone .fin { min-width: 220px; }
 .gitform .note,
 .gitclone .note { font-size: 11px; color: var(--ink-3); }
+
+/* --- Part B: share / history / my-day / conflict ------------------------- */
+
+.rochip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--vermilion);
+  color: var(--vermilion);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.robanner {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--vermilion);
+  border-left-width: 3px;
+  background: var(--paper-2);
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.project.is-readonly .proj-toolbar .btn[disabled] { opacity: 0.45; }
+.tick.is-disabled { opacity: 0.5; }
+
+.panelbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.panelbar__spacer { flex: 1; }
+.panelops { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+
+.sharepanel,
+.conflictpanel {
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-2);
+  padding: 12px 16px;
+  margin: 0 0 14px;
+}
+.sharepanel .note--alert,
+.conflictpanel .note--alert {
+  border: 1px solid var(--vermilion);
+  padding: 6px 10px;
+  margin: 6px 0 10px;
+  color: var(--ink-2);
+}
+.note--warn { color: var(--rag-amber); font-size: 11.5px; margin-top: 6px; }
+
+.shline {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+.shline .kicker { min-width: 72px; }
+.shpill {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  border: 1px solid var(--rule-strong);
+  padding: 1px 6px;
+  color: var(--ink-2);
+}
+.shlink { color: var(--ink-2); font-size: 12px; word-break: break-all; }
+
+.shlist { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 10px; }
+.shrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}
+.shrow__perm { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.shrow__spacer { flex: 1; }
+.shinvite { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+
+.hrs { margin-top: 6px; }
+.hlist { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.hrow {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  font-size: 12.5px;
+}
+.hrow.is-active { border-color: var(--ink); background: var(--paper-2); }
+.hrow__sha { min-width: 64px; }
+.hrow__author { min-width: 96px; display: inline-flex; align-items: center; gap: 5px; }
+.hrow__time { min-width: 84px; color: var(--ink-3); font-family: var(--mono); font-size: 11px; }
+.hrow__msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.me-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--vermilion); display: inline-block; }
+
+.diffbox {
+  margin: 10px 0;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-2);
+  padding: 10px 12px;
+}
+.difflist { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.diffrow { font-size: 12.5px; padding: 3px 6px; border-left: 2px solid var(--rule-strong); }
+.chg { font-family: var(--mono); font-size: 11px; }
+.chg--add { color: var(--rag-green); }
+.chg--del { color: var(--vermilion); }
+.chg--tick { color: var(--rag-green); }
+.chg--untick { color: var(--vermilion); }
+.diffrow .from { color: var(--ink-3); }
+.diffrow .to { color: var(--ink); font-weight: 600; }
+
+.clist { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.crow { border: 1px solid var(--rule-strong); background: var(--paper); padding: 8px 10px; }
+.crow__head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
+.crow__field { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.crow__sides { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; margin-bottom: 6px; }
+.crow__side--ours b { color: var(--ink); }
+.crow__side--theirs b { color: var(--vermilion-deep); }
+.crow__base { color: var(--ink-3); font-size: 11.5px; }
+.crow__choice { display: flex; gap: 16px; font-size: 12px; }
+.crow__choice label { display: inline-flex; align-items: center; gap: 4px; }

@@ -11,6 +11,7 @@
 const path = require('path');
 const { contextBridge } = require('electron');
 const data = require('./data');
+const gitx = require('./gitx');
 
 // A full git identity for the harness so commits never fail on this machine.
 process.env.GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'Harness';
@@ -44,7 +45,7 @@ contextBridge.exposeInMainWorld('api', {
   gitPush: async (projectId) => data.gitPush(roots, projectId),
   gitInit: async (projectId, opts) => data.gitInit(roots, projectId, opts),
   gitBind: async (projectId, remote, opts) => data.gitBind(roots, projectId, remote, opts),
-  gitSync: async (projectId, opts) => data.gitSync(roots, projectId, opts),
+  gitSync: async (projectId, opts) => gitx.syncProject(roots, projectId, opts),
   gitClone: async (url, destDir) => {
     const r = await data.gitClone(url, destDir);
     if (r && r.ok && r.dir) {
@@ -54,6 +55,19 @@ contextBridge.exposeInMainWorld('api', {
     return r;
   },
   gitRoots: async () => roots.slice(),
+
+  // P3-P6 (real)
+  shareInfo: async (projectId) => gitx.shareInfo(roots, projectId),
+  shareAccess: async (projectId) => gitx.checkAccess(roots, projectId),
+  shareInvite: async (projectId, user, permission) => gitx.inviteCollaborator(roots, projectId, user, permission),
+  shareRemove: async (projectId, user) => gitx.removeCollaborator(roots, projectId, user),
+  historyLog: async (projectId, opts) => gitx.historyLog(roots, projectId, opts),
+  historyDiff: async (projectId, sha) => gitx.commitDiff(roots, projectId, sha),
+  historyRestore: async (projectId, sha) => gitx.restoreCommit(roots, projectId, sha),
+  identity: async () => gitx.identity(),
+  myday: async (who, today) => gitx.collectMyTasks(data.scanRoots(roots).projects, who, today),
+  gitIntegrate: async (projectId) => gitx.integrateRemote(roots, projectId, {}),
+  gitResolve: async (projectId, choices) => gitx.resolveMerge(roots, projectId, choices),
 
   // inert stubs for paths the harness never triggers
   addTask: async () => ok({ task: { id: 'T9.9' } }),

@@ -108,4 +108,16 @@ contextBridge.exposeInMainWorld('api', {
   gitSync: async () => ok({ committed: false, pulled: false, pushed: false, message: 'sync' }),
   gitClone: async () => ({ ok: false, error: 'stub: no real clone in this harness' }),
   gitRoots: async () => [],
+  // P3-P6 stubs
+  shareInfo: async () => ({ ok: false, code: 'no_remote', error: 'stub', remote: null, readOnly: false }),
+  shareAccess: async () => ({ ok: true, readOnly: false, permission: null, source: 'stub' }),
+  shareInvite: async () => ({ ok: false, code: 'gh_not_authed', error: 'stub' }),
+  shareRemove: async () => ({ ok: false, code: 'gh_not_authed', error: 'stub' }),
+  historyLog: async () => ok({ commits: [] }),
+  historyDiff: async () => ok({ changes: [], commit: {} }),
+  historyRestore: async () => ({ ok: false, error: 'stub' }),
+  identity: async () => ({ ok: true, gitUser: 'Harness', ghLogin: null, ghInstalled: false }),
+  myday: async () => ({ overdue: [], today: [], week: [], ready: [], count: 0 }),
+  gitIntegrate: async () => ok({ upToDate: true }),
+  gitResolve: async () => ({ ok: false, error: 'stub' }),
 });

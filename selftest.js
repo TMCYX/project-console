@@ -59,6 +59,7 @@ const {
   deriveCommitMessage,
   commitMessageFromDiff,
 } = require('./data');
+const gx = require('./gitx');
 
 const ROOT = process.env.PROJECT_CONSOLE_ROOT || DEFAULT_ROOT;
 
@@ -680,6 +681,184 @@ function gitx(args, cwd) {
     'commitMessageFromDiff: plan add',
     commitMessageFromDiff({ tasks: [] }, { tasks: {} }, { tasks: [{ id: 'T5.3' }] }, { tasks: {} }) === 'plan: +T5.3'
   );
+
+  /* ================= P3–P6: share / history / myday / merge ============== */
+
+  console.log('');
+  console.log('Part B — share / history / my-day / merge (temp repos):');
+
+  /* --- P3: gh layer + graceful degrade ---------------------------------- */
+  check('parseRemote: https github', JSON.stringify(gx.parseRemote('https://github.com/a/b.git')) === '{"host":"github.com","owner":"a","name":"b"}');
+  check('parseRemote: ssh github', (gx.parseRemote('git@github.com:a/b.git') || {}).owner === 'a');
+  check('parseRemote: rejects non-github', gx.parseRemote('https://gitlab.com/a/b.git') === null);
+  const ghav = await gx.ghAvailable();
+  check('ghAvailable: structured result', typeof ghav.installed === 'boolean' && typeof ghav.authed === 'boolean', JSON.stringify(ghav));
+  const shareRes = await gx.shareInfo(gRoot, 'gp'); // gp remote is a local path
+  check(
+    'shareInfo degrades for a non-github remote (no crash)',
+    shareRes && shareRes.ok === false && ['not_github', 'no_remote', 'gh_not_authed', 'gh_missing'].includes(shareRes.code),
+    JSON.stringify(shareRes && shareRes.code)
+  );
+  const access = await gx.checkAccess(gRoot, 'gp');
+  check('checkAccess: structured result', access && access.ok === true && typeof access.readOnly === 'boolean', JSON.stringify(access));
+
+  /* --- P4: history / task-diff / restore on a temp project -------------- */
+  const hxDir = path.join(gRoot, 'hx');
+  const hxPlan = {
+    schema: 'omo-project/plan@2', id: 'hx', title: 'HX', created: '2026-10-11', target: '2026-10-20',
+    phases: [{ id: 'P1', name: 'P' }],
+    tasks: [{ id: 'T1.1', phase: 'P1', title: 'first', owner: 'Jack', start: '2026-10-11', estimate_days: 1, deps: [], deliverable: '', acceptance: '', outputs: [] }],
+    milestones: [], risks: [],
+  };
+  fs.mkdirSync(hxDir, { recursive: true });
+  fs.writeFileSync(path.join(hxDir, 'plan.json'), JSON.stringify(hxPlan, null, 2));
+  fs.writeFileSync(path.join(hxDir, 'progress.json'), JSON.stringify({ schema: 'omo-project/progress@1', project: 'hx', updated: null, tasks: {} }, null, 2));
+  gitx(['init', '-b', 'main'], hxDir);
+  gitx(['config', 'user.name', 'Selftest'], hxDir);
+  gitx(['config', 'user.email', 'selftest@example.com'], hxDir);
+  gitx(['add', '-A'], hxDir);
+  gitx(['commit', '-m', 'init hx'], hxDir);
+
+  setTaskDone(gRoot, 'hx', 'T1.1', true);
+  const hxPlan2 = readJsonSafe(path.join(hxDir, 'plan.json')).value;
+  hxPlan2.tasks[0].owner = 'Dorian';
+  hxPlan2.tasks[0].title = 'renamed';
+  fs.writeFileSync(path.join(hxDir, 'plan.json'), JSON.stringify(hxPlan2, null, 2));
+  gitx(['add', '-A'], hxDir);
+  gitx(['commit', '-m', 'tick + edit'], hxDir);
+
+  const hist = await gx.historyLog(gRoot, 'hx', { limit: 10 });
+  check('historyLog lists 2 commits', hist.ok && hist.commits.length === 2, JSON.stringify(hist.commits && hist.commits.length));
+  check('historyLog newest first = "tick + edit"', hist.commits[0] && hist.commits[0].message === 'tick + edit', hist.commits[0] && hist.commits[0].message);
+  check('historyLog author captured', hist.commits[0] && hist.commits[0].author === 'Selftest', hist.commits[0] && hist.commits[0].author);
+  const latestSha = hist.commits[0].sha;
+  const dif = await gx.commitDiff(gRoot, 'hx', latestSha);
+  check('commitDiff ok', dif.ok === true, dif.error);
+  check('commitDiff: T1.1 tick', dif.changes.some((c) => c.kind === 'tick' && c.id === 'T1.1'), JSON.stringify(dif.changes));
+  check('commitDiff: owner Jack → Dorian', dif.changes.some((c) => c.kind === 'task-field' && c.id === 'T1.1' && c.field === 'owner' && c.from === 'Jack' && c.to === 'Dorian'), JSON.stringify(dif.changes));
+  check('commitDiff: title edit', dif.changes.some((c) => c.kind === 'task-field' && c.field === 'title' && c.to === 'renamed'), JSON.stringify(dif.changes));
+  const parentSha = hist.commits[1].sha;
+  const restore = await gx.restoreCommit(gRoot, 'hx', parentSha);
+  check('restoreCommit ok', restore.ok, restore.error);
+  const progAfterRestore = readJsonSafe(path.join(hxDir, 'progress.json')).value;
+  check('restoreCommit reverted the tick', !(progAfterRestore.tasks['T1.1'] && progAfterRestore.tasks['T1.1'].done === true));
+  check('restoreCommit returns undo files', restore.undo && restore.undo.files.length >= 1);
+
+  /* --- P5: my-day grouping ---------------------------------------------- */
+  const my = gx.collectMyTasks(
+    [{ id: 'x', title: 'X', tasks: [
+      { id: 'A', owner: 'Jack', done: false, status: 'overdue', plannedEnd: '2026-01-01', deps: [] },
+      { id: 'B', owner: 'Jack', done: false, status: 'pending', plannedEnd: '2026-10-11', deps: [] },
+      { id: 'C', owner: 'Jack', done: false, status: 'pending', plannedEnd: '2026-10-15', deps: [] },
+      { id: 'D', owner: 'Jack', done: false, status: 'pending', plannedEnd: '2026-11-01', deps: ['E'] },
+      { id: 'E', owner: 'Jack', done: true, status: 'done', plannedEnd: '2026-10-01', deps: [] },
+      { id: 'F', owner: 'Dorian', done: false, status: 'pending', plannedEnd: '2026-10-11', deps: [] },
+    ] }],
+    'Jack',
+    '2026-10-11'
+  );
+  check('myday overdue', my.overdue.length === 1 && my.overdue[0].taskId === 'A', JSON.stringify(my.overdue.map((t) => t.taskId)));
+  check('myday today', my.today.length === 1 && my.today[0].taskId === 'B', JSON.stringify(my.today.map((t) => t.taskId)));
+  check('myday week', my.week.length === 1 && my.week[0].taskId === 'C', JSON.stringify(my.week.map((t) => t.taskId)));
+  check('myday ready (deps done)', my.ready.length === 1 && my.ready[0].taskId === 'D', JSON.stringify(my.ready.map((t) => t.taskId)));
+  check('myday excludes other owners + done', my.count === 4, String(my.count));
+  check('myday empty for blank who', gx.collectMyTasks([{ id: 'x', tasks: [] }], '', '2026-10-11').count === 0);
+
+  /* --- P6: field-level merge (pure) ------------------------------------- */
+  const bplan = { schema: 'omo-project/plan@2', id: 'm', tasks: [{ id: 'T1.1', phase: 'P1', title: 'a', owner: 'Jack', deps: [], outputs: [] }, { id: 'T2.1', phase: 'P1', title: 'b', owner: 'Jack', deps: [], outputs: [] }], phases: [{ id: 'P1', name: 'P' }], milestones: [] };
+  const oplan = JSON.parse(JSON.stringify(bplan));
+  oplan.tasks[0].title = 'a-ours';
+  const tplan = JSON.parse(JSON.stringify(bplan));
+  tplan.tasks[1].title = 'b-theirs';
+  const mt = gx.mergeTrees(bplan, { tasks: {} }, oplan, { tasks: {} }, tplan, { tasks: {} });
+  check('merge: edits to different tasks auto-merge (0 conflicts)', mt.conflicts.length === 0, JSON.stringify(mt.conflicts));
+  check('merge: keeps both edits', mt.plan.tasks[0].title === 'a-ours' && mt.plan.tasks[1].title === 'b-theirs');
+  const tplan2 = JSON.parse(JSON.stringify(bplan));
+  tplan2.tasks[0].title = 'a-theirs';
+  const mt2 = gx.mergeTrees(bplan, { tasks: {} }, oplan, { tasks: {} }, tplan2, { tasks: {} });
+  check('merge: same task+field surfaces 1 conflict', mt2.conflicts.length === 1 && mt2.conflicts[0].id === 'T1.1' && mt2.conflicts[0].field === 'title', JSON.stringify(mt2.conflicts));
+  const pm = gx.mergeProgress3({ tasks: {} }, { tasks: { 'T1.1': { done: true, doneAt: '2026-10-11' } } }, { tasks: { 'T2.1': { done: true, doneAt: '2026-10-11' } } });
+  check('merge: different tasks ticked auto-merge', pm.conflicts.length === 0 && pm.progress.tasks['T1.1'].done && pm.progress.tasks['T2.1'].done, JSON.stringify(pm.conflicts));
+  const pm2 = gx.mergeProgress3({ tasks: {} }, { tasks: { 'T1.1': { done: true } } }, { tasks: { 'T1.1': { done: false } } });
+  check('merge: same task done-vs-undone is a conflict', pm2.conflicts.length >= 1, JSON.stringify(pm2.conflicts));
+  const mtResolve = gx.mergeTrees(bplan, { tasks: {} }, oplan, { tasks: {} }, tplan2, { tasks: {} }, { 'task:T1.1:title': 'theirs' });
+  check('merge: choice=theirs resolves the conflict', mtResolve.conflicts.length === 0 && mtResolve.plan.tasks[0].title === 'a-theirs');
+
+  /* --- P6: integrateRemote two-writer (temp repos) ---------------------- */
+  const twRoot = path.join(gitTmp, 'tw');
+  const org = path.join(twRoot, 'org.git');
+  fs.mkdirSync(twRoot, { recursive: true });
+  gitx(['init', '--bare', '-b', 'main', org], twRoot);
+  const seedDir = path.join(twRoot, 'seed');
+  fs.mkdirSync(seedDir, { recursive: true });
+  const twPlan = {
+    schema: 'omo-project/plan@2', id: 'tw', title: 'TW', created: '2026-10-11', target: '2026-10-20',
+    phases: [{ id: 'P1', name: 'P' }],
+    tasks: [
+      { id: 'T1.1', phase: 'P1', title: 'one', owner: 'Jack', start: '2026-10-11', estimate_days: 1, deps: [], deliverable: '', acceptance: '', outputs: [] },
+      { id: 'T2.1', phase: 'P1', title: 'two', owner: 'Jack', start: '2026-10-11', estimate_days: 1, deps: [], deliverable: '', acceptance: '', outputs: [] },
+    ],
+    milestones: [], risks: [],
+  };
+  fs.writeFileSync(path.join(seedDir, 'plan.json'), JSON.stringify(twPlan, null, 2));
+  fs.writeFileSync(path.join(seedDir, 'progress.json'), JSON.stringify({ schema: 'omo-project/progress@1', project: 'tw', updated: null, tasks: {} }, null, 2));
+  gitx(['init', '-b', 'main'], seedDir);
+  gitx(['config', 'user.name', 'Selftest'], seedDir);
+  gitx(['config', 'user.email', 'selftest@example.com'], seedDir);
+  gitx(['add', '-A'], seedDir);
+  gitx(['commit', '-m', 'seed tw'], seedDir);
+  gitx(['remote', 'add', 'origin', org], seedDir);
+  gitx(['push', '-u', 'origin', 'main'], seedDir);
+  const cloneA = path.join(twRoot, 'cloneA');
+  const cloneB = path.join(twRoot, 'cloneB');
+  gitx(['clone', org, cloneA], twRoot);
+  gitx(['clone', org, cloneB], twRoot);
+
+  // A edits T1.1, pushes; B edits T2.1, commits → auto-merge.
+  const aP = readJsonSafe(path.join(cloneA, 'plan.json')).value;
+  aP.tasks[0].title = 'A-title';
+  fs.writeFileSync(path.join(cloneA, 'plan.json'), JSON.stringify(aP, null, 2));
+  gitx(['add', '-A'], cloneA);
+  gitx(['commit', '-m', 'A edit'], cloneA);
+  gitx(['push'], cloneA);
+  const bP = readJsonSafe(path.join(cloneB, 'plan.json')).value;
+  bP.tasks[1].title = 'B-title';
+  fs.writeFileSync(path.join(cloneB, 'plan.json'), JSON.stringify(bP, null, 2));
+  gitx(['add', '-A'], cloneB);
+  gitx(['commit', '-m', 'B edit'], cloneB);
+  const integ = await gx.integrateRemote(twRoot, 'cloneB', {});
+  check('integrateRemote: divergent edits auto-merge', integ.ok && integ.merged === true && (!integ.conflicts || integ.conflicts.length === 0), JSON.stringify(integ));
+  const bMerged = readJsonSafe(path.join(cloneB, 'plan.json')).value;
+  check('auto-merged plan has BOTH A + B edits', bMerged.tasks[0].title === 'A-title' && bMerged.tasks[1].title === 'B-title', JSON.stringify(bMerged.tasks.map((t) => t.title)));
+
+  // Same-task conflict: A and B both edit T1.1 differently.
+  const aP2 = readJsonSafe(path.join(cloneA, 'plan.json')).value;
+  aP2.tasks[0].title = 'A-second';
+  fs.writeFileSync(path.join(cloneA, 'plan.json'), JSON.stringify(aP2, null, 2));
+  gitx(['add', '-A'], cloneA);
+  gitx(['commit', '-m', 'A edit2'], cloneA);
+  gitx(['push'], cloneA);
+  const bP2 = readJsonSafe(path.join(cloneB, 'plan.json')).value;
+  bP2.tasks[0].title = 'B-second';
+  fs.writeFileSync(path.join(cloneB, 'plan.json'), JSON.stringify(bP2, null, 2));
+  gitx(['add', '-A'], cloneB);
+  gitx(['commit', '-m', 'B edit2'], cloneB);
+  const integ2 = await gx.integrateRemote(twRoot, 'cloneB', {});
+  check('integrateRemote: same-task conflict needs resolution', integ2.ok && integ2.needsResolution === true && integ2.conflicts.length >= 1, JSON.stringify(integ2.conflicts));
+  check('conflict is on T1.1 title', integ2.conflicts.some((c) => c.id === 'T1.1' && c.field === 'title' && c.ours === 'B-second' && c.theirs === 'A-second'), JSON.stringify(integ2.conflicts));
+  const resolved = await gx.resolveMerge(
+    twRoot,
+    'cloneB',
+    integ2.conflicts.map((c) => ({ scope: c.scope, id: c.id, field: c.field, choice: 'theirs' }))
+  );
+  check('resolveMerge commits the resolution', resolved.ok && (resolved.merged === true || resolved.newSha), JSON.stringify(resolved));
+  const bFinal = readJsonSafe(path.join(cloneB, 'plan.json')).value;
+  check('resolved plan took theirs (A-second)', bFinal.tasks[0].title === 'A-second', bFinal.tasks[0].title);
+  check('resolved plan kept our non-conflicting T2.1', bFinal.tasks[1].title === 'B-title', bFinal.tasks[1].title);
+
+  // syncProject basic (clean + up to date).
+  const syncRes = await gx.syncProject(twRoot, 'cloneA', {});
+  check('syncProject ok (clean, up-to-date)', syncRes.ok === true, JSON.stringify(syncRes));
 })()
   .catch((err) => {
     failed++;

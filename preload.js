@@ -50,6 +50,21 @@ contextBridge.exposeInMainWorld('api', {
   gitSync: (projectId, opts) => ipcRenderer.invoke('git:sync', { projectId, opts }),
   gitClone: (url, destDir) => ipcRenderer.invoke('git:clone', { url, destDir }),
   gitRoots: () => ipcRenderer.invoke('git:roots'),
+  // P3: share & permissions
+  shareInfo: (projectId) => ipcRenderer.invoke('share:info', { projectId }),
+  shareAccess: (projectId) => ipcRenderer.invoke('share:access', { projectId }),
+  shareInvite: (projectId, user, permission) => ipcRenderer.invoke('share:invite', { projectId, user, permission }),
+  shareRemove: (projectId, user) => ipcRenderer.invoke('share:remove', { projectId, user }),
+  // P4: project history
+  historyLog: (projectId, opts) => ipcRenderer.invoke('history:log', { projectId, opts }),
+  historyDiff: (projectId, sha) => ipcRenderer.invoke('history:diff', { projectId, sha }),
+  historyRestore: (projectId, sha) => ipcRenderer.invoke('history:restore', { projectId, sha }),
+  // P5: identity / my-day
+  identity: () => ipcRenderer.invoke('app:identity'),
+  myday: (who, today) => ipcRenderer.invoke('myday:collect', { who, today }),
+  // P6: merge / conflict
+  gitIntegrate: (projectId) => ipcRenderer.invoke('git:integrate', { projectId }),
+  gitResolve: (projectId, choices) => ipcRenderer.invoke('git:resolve', { projectId, choices }),
   onUpdate: (cb) => {
     const handler = (_event, payload) => cb(payload);
     ipcRenderer.on('projects:update', handler);

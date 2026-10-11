@@ -38,7 +38,11 @@ external fonts, zero non-Electron runtime dependencies.**
 | **Editing** | Add / edit / delete / reorder tasks & phases & milestones · dependency editor with cycle detection · reschedule (longest-path) · critical path · baseline freeze & ghost bars · filters · multi-select batch tick · Undo/Redo (100 deep) |
 | **Data I/O** | Export PNG / PDF / CSV / Markdown · Obsidian bridge (`tasks.md` sync + read-back) · Markdown checklist import · automatic per-write backups (keep 20) with one-click restore |
 | **Appearance** | Light / dark / auto · compact / cosy density · resizable rail & task panel · WBS mini-map · focus mode |
-| **Team sync** *(new)* | Per-project git status chip (已最新 / 領先 N / 落後 N / 有本地改動 / 未連接 / 同步中) · one-click **Sync** = pull → auto-commit → push · auto commit messages (`tick: T3.1 done by Jack`) · 「加入 Git 專案」 clone-from-URL flow |
+| **Team sync** *(new)* | Per-project git status chip (已最新 / 領先 N / 落後 N / 有本地改動 / 未連接 / 同步中) · one-click **Sync** = commit → integrate → push · auto commit messages (`tick: T3.1 done by Jack`) · 「加入 Git 專案」 clone-from-URL flow |
+| **Share & permissions** *(P3)* | 「分享」 panel: repo (owner/name, URL, private/public), collaborator list + per-person permission, pending invites · invite / remove via `gh api` · **read-only mode** (唯讀 chip) when you lack push rights |
+| **Project history** *(P4)* | 「歷程」 view: commit list (author / relative time / message, marks your commits) · **task-level diff** (`T3.1 未完成 → 已完成`, `T2.3 owner Jack → Dorian`) · one-click **restore** to any commit (recoverable) |
+| **My day** *(P5)* | 「我今日要做」 top-level view: my tasks grouped 逾期 / 今日 / 本週 / 下一個 ready, clickable → jump to the task · 「我是誰」 identity (defaults to git user / GitHub login) |
+| **Conflict handling** *(P6)* | **field-level 3-way merge** — edits to different tasks/fields auto-merge on pull · same-task conflicts raise a **conflict UI** (揀本地 / 揀對方 / 合併) · clear errors for offline / rejected push / no remote / read-only |
 
 ## Quick start
 
@@ -181,12 +185,14 @@ node selftest.js
 Scans the data root, asserts the `plan@2` / `progress@1` contract and the
 `_demo` fixture, checks graceful degradation (bad JSON, missing progress), does a
 round-trip tick on a **temp copy** (the real `_demo/progress.json` is never
-touched), and exercises the **binding + git layer on temp repos**. Prints
-`RESULT: PASS` / `FAIL` (exit 0 / 1).
+touched), and exercises the **binding + git layer + share/history/my-day/merge**
+on **temp repos** (field-level merge, two-writer conflicts, commit history &
+restore). Prints `RESULT: PASS` / `FAIL` (exit 0 / 1).
 
 ```bash
 ./node_modules/.bin/electron harness.js        # UI acceptance (in-app guide)
 ./node_modules/.bin/electron harness-git.js    # UI acceptance (git sync + clone)
+./node_modules/.bin/electron harness-pb.js     # UI acceptance (share / history / my-day / conflict)
 ```
 
 ## Files
@@ -195,12 +201,13 @@ touched), and exercises the **binding + git layer on temp repos**. Prints
 | --- | --- |
 | `main.js` | Electron main process: window, scan, watch, IPC (writes + git) |
 | `data.js` | Pure-Node data layer (scan / parse / summary / atomic writes / **git layer**) — shared by main and selftest |
+| `gitx.js` | Pure-Node Part B layer: `gh` share/permissions, project history/diff/restore, my-day, field-level merge + integrate (shared by main, selftest, harnesses) |
 | `preload.js` | `contextBridge`: data + write + **git** calls |
 | `renderer/index.html` | shell (topbar / rail / main / task panel) |
 | `renderer/styles.css` | Swiss-industrial theme — all design tokens in `:root` |
 | `renderer/renderer.js` | the four views + inline-SVG Gantt + ticking + sync UI |
 | `selftest.js` | headless data-layer tests |
-| `harness.js` / `harness-git.js` | headless UI acceptance harnesses |
+| `harness.js` / `harness-git.js` / `harness-pb.js` | headless UI acceptance harnesses |
 | `agents/project-manager.md` | the Project-Manager AI agent mode (bundled) |
 | `skills/project-management/` | the project-management skill (bundled) |
 
