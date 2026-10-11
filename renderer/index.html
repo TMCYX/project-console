@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Project Console</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar__brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="wordmark">PROJECT&nbsp;CONSOLE</span>
+        <span class="tag">omo-project · plan@2 / progress@1</span>
+      </div>
+      <div class="topbar__meta">
+        <span class="meta-item" id="meta-root" title="">—</span>
+        <span class="meta-sep">·</span>
+        <span class="meta-item" id="meta-count">0 projects</span>
+        <span class="meta-sep">·</span>
+        <span class="meta-item" id="meta-clock">—</span>
+        <span class="meta-item meta-updated" id="meta-updated" hidden>已更新</span>
+        <button id="dash-btn" class="btn btn--ghost" type="button" data-top="dashboard">儀表板</button>
+        <button id="roadmap-btn" class="btn btn--ghost" type="button" data-top="roadmap">路線圖</button>
+        <button id="theme-btn" class="btn btn--ghost" type="button">深色</button>
+        <button id="density-btn" class="btn btn--ghost" type="button">緊湊</button>
+        <button id="undo-btn" class="btn" type="button" title="Undo (Ctrl+Z)" disabled>Undo</button>
+        <button id="redo-btn" class="btn" type="button" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button>
+        <button id="refresh-btn" class="btn" type="button">Refresh</button>
+        <button id="help-btn" class="btn btn--ghost" type="button" title="使用說明 (teaching guide)">? 使用說明</button>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="rail" id="rail">
+        <div class="rail__head">
+          <span class="kicker">Portfolio</span>
+          <span class="kicker kicker--dim" id="rail-count">—</span>
+        </div>
+        <div class="rail__list" id="portfolio-list"></div>
+        <div class="rail__foot">
+          <span class="warn" id="warnings" hidden></span>
+        </div>
+      </aside>
+
+      <div
+        class="splitter"
+        id="rail-splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="調整側欄寬度"
+        title="拖曳調整寬度 · 雙擊還原"
+        tabindex="0"
+      >
+        <button class="splitter__reset" id="rail-reset" type="button" title="還原側欄寬度">⟲</button>
+      </div>
+
+      <main class="main" id="main">
+        <div id="project-view"></div>
+
+        <section class="landing" id="landing"></section>
+      </main>
+
+      <section class="panel" id="task-panel" hidden aria-label="Task detail">
+        <div class="panel-resizer" id="panel-resizer" title="拖曳調整闊度"></div>
+        <div class="panel__bar">
+          <span class="kicker" id="task-panel-kicker">Task</span>
+          <button class="btn btn--ghost" id="task-close" type="button">關閉</button>
+        </div>
+        <div class="panel__body" id="task-panel-body"></div>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+    <div class="ctx" id="ctx-menu" hidden></div>
+    <div class="guide" id="guide" hidden></div>
+    <div class="print-root" id="print-root" hidden></div>
+    <div class="confirm" id="confirm" hidden>
+      <div class="confirm__box">
+        <p class="confirm__msg" id="confirm-msg"></p>
+        <div class="confirm__ops">
+          <button class="btn" id="confirm-ok" type="button">確定</button>
+          <button class="btn btn--ghost" id="confirm-cancel" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

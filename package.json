@@ -1,0 +1,14 @@
+{
+  "name": "project-console",
+  "version": "1.0.0",
+  "description": "Project Console — a local, read-only portfolio console over a folder of project JSON files.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "selftest": "node selftest.js"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

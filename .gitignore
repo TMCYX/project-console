@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Build output / exports / scratch
+dist/
+out/
+build/
+exports/
+.pc-tmp/
+.selftest-*/
+.harness-*/
+
+# Temp files (atomic-write leftovers)
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
