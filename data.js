@@ -12,10 +12,30 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const DEFAULT_ROOT = 'C:\\Users\\jackt\\.claude\\wiki\\projects\\';
+/**
+ * Resolve the default data root (the folder that holds project folders).
+ * Order: env PROJECT_CONSOLE_ROOT → <app>/project-console.config.json
+ * ({ "dataRoot": "..." }, gitignored) → ~/ProjectConsole/projects.
+ */
+function resolveDefaultRoot() {
+  if (process.env.PROJECT_CONSOLE_ROOT) return process.env.PROJECT_CONSOLE_ROOT;
+  try {
+    const cfgPath = path.join(__dirname, 'project-console.config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (cfg && typeof cfg.dataRoot === 'string' && cfg.dataRoot) return cfg.dataRoot;
+    }
+  } catch (_) {
+    /* ignore malformed config */
+  }
+  return path.join(os.homedir(), 'ProjectConsole', 'projects');
+}
+
+const DEFAULT_ROOT = resolveDefaultRoot();
 const PLAN_SCHEMA = 'omo-project/plan@2';
 const PROGRESS_SCHEMA = 'omo-project/progress@1';
 const DAY = 86400000;

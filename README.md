@@ -55,17 +55,15 @@ npm install          # installs Electron (the only dependency)
 npm start            # launch the app
 ```
 
-Out of the box the app reads its projects from:
+The app reads its projects from a **data root**. Resolution order:
 
-```
-C:\Users\jackt\.claude\wiki\projects\        (Windows)
-```
-
-Override it for a test run:
+1. `PROJECT_CONSOLE_ROOT` environment variable
+2. `project-console.config.json` next to the app — `{ "dataRoot": "…" }` (gitignored — create your own)
+3. Default: `~/ProjectConsole/projects`
 
 ```bash
-PROJECT_CONSOLE_ROOT="/path/to/projects" npm start     # bash
-$env:PROJECT_CONSOLE_ROOT="D:\projects"; npm start     # PowerShell
+PROJECT_CONSOLE_ROOT="/path/to/projects" npm start     # bash (one-off)
+$env:PROJECT_CONSOLE_ROOT="D:\projects"; npm start     # PowerShell (one-off)
 ```
 
 > Git-bash: if `ELECTRON_RUN_AS_NODE` is set in your environment, `unset` it

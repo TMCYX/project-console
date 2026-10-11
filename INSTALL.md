@@ -85,15 +85,11 @@ print the next steps. They do **not** overwrite anything outside
 npm start             # launches the Electron app
 ```
 
-The app reads projects from its **data root**:
+The app reads projects from its **data root** (resolution order):
+`PROJECT_CONSOLE_ROOT` env var → `project-console.config.json` next to the app
+(`{ "dataRoot": "…" }`, gitignored) → default `~/ProjectConsole/projects`.
 
-```
-C:\Users\jackt\.claude\wiki\projects\        (Windows default)
-~/…/wiki/projects/                            (set via PROJECT_CONSOLE_ROOT)
-```
-
-Each immediate-or-nested subfolder containing a `plan.json` is a project. Set a
-different root with the `PROJECT_CONSOLE_ROOT` environment variable.
+Any folder at any depth containing a `plan.json` is treated as a project.
 
 ### 5. Team sync (optional)
 

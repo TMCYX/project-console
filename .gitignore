@@ -27,3 +27,6 @@ Desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Local machine config (never commit)
+project-console.config.json

@@ -16,7 +16,7 @@ description: Project-management discipline for the Project-Manager mode. Turns a
 
 ## 產物（每個專案一個資料夾）
 
-Project root = `wiki/projects/<project-id>/`（即 `C:\Users\jackt\.claude\wiki\projects\<project-id>\`）：
+Project root = 你嘅 projects 資料夾底下嘅 `<project-id>/`（例如 `<dataRoot>/<project-id>/`；dataRoot 預設 `~/ProjectConsole/projects`，可用 `project-console.config.json` 或 `PROJECT_CONSOLE_ROOT` 指定）：
 
 ```
 wiki/projects/<project-id>/
