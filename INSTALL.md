@@ -106,6 +106,12 @@ Both scripts check `node`/`npm`, run `npm install`, copy the mode + the `/pm`
 command + the skill, and print the next steps. They do **not** overwrite
 anything outside `~/.config/opencode/`.
 
+**Use your own model:** the bundled mode pins `model: deepseek/deepseek-flash`
+(Jack's setup). If your opencode doesn't have it — or you'd rather use your
+own — edit the `model:` line in `~/.config/opencode/agent/project-manager.md`
+(or delete the line) so the mode runs on your own model and your own
+subagent setup instead.
+
 ### 4. Launch (or tell the human to)
 
 ```bash
