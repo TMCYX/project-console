@@ -3,15 +3,17 @@
 /* ==========================================================================
    smoke.js — fresh-install smoke test (no data root or fixture needed).
 
-   Proves the three layers a NEW CLONE depends on — the class of failure that
-   once shipped: the app worked on the author's machine (a local, gitignored
+   Proves the layers a NEW CLONE depends on — the class of failure that once
+   shipped: the app worked on the author's machine (a local, gitignored
    project-console.config.json masked the bug) while every fresh clone died
    before the window opened.
 
      1. MODULE LOAD — the pure-Node modules load from a config-less copy
                       (exactly the fresh-clone condition).
      2. DATA LAYER  — scan a minimal temp fixture, tick a task, verify the write.
-     3. APP BOOT    — spawn the real Electron app (`electron . --smoke-exit`)
+     3. AI MODE     — the bundled agent / /pm command / skill files exist and
+                      carry their frontmatter markers (what INSTALL.md copies).
+     4. APP BOOT    — spawn the real Electron app (`electron . --smoke-exit`)
                       against the fixture and wait for the UI to render.
                       Skipped with a note when electron is not installed
                       (run `npm install` first; CI always installs it).
@@ -152,7 +154,34 @@ const projDir = path.join(dataRoot, 'smoketest');
   check('tick round-trip writes progress.json', tick.ok === true && ticked, tick.error);
 }
 
-/* -- 3. app boot ---------------------------------------------------------- */
+/* -- 3. AI mode bundle (agent + /pm command + skill) ----------------------- */
+
+console.log('');
+console.log('AI mode bundle:');
+{
+  const bundle = [
+    ['agents/project-manager.md', 'mode: primary'],
+    ['commands/pm.md', 'agent: project-manager'],
+    ['skills/project-management/SKILL.md', 'name: project-management'],
+    ['skills/project-management/references/templates.md', null],
+    ['skills/project-management/references/data-contract.md', null],
+  ];
+  for (const [rel, marker] of bundle) {
+    const p = path.join(ROOT, rel);
+    let ok = false;
+    let why = '';
+    try {
+      const src = fs.readFileSync(p, 'utf8');
+      ok = marker ? src.includes(marker) : true;
+      why = ok ? '' : `missing "${marker}"`;
+    } catch (e) {
+      why = e.message;
+    }
+    check(`bundle: ${rel}`, ok, why);
+  }
+}
+
+/* -- 4. app boot ---------------------------------------------------------- */
 
 (async () => {
   console.log('');
