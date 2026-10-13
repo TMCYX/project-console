@@ -4,9 +4,10 @@
   Idempotent: safe to re-run. It will:
     1) verify node + npm are available,
     2) npm install in the app directory,
-    3) copy agents/* -> ~/.config/opencode/agent/  (the Project-Manager mode),
-    4) copy skills/* -> ~/.config/opencode/skills/ (the project-management skill),
-    5) print the next steps (launch + data root).
+    3) copy agents/*   -> ~/.config/opencode/agent/   (the Project-Manager mode),
+    4) copy commands/* -> ~/.config/opencode/command/ (the /pm command),
+    5) copy skills/*   -> ~/.config/opencode/skills/  (the project-management skill),
+    6) print the next steps (launch + data root).
 
   Usage:
     powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -48,10 +49,12 @@ Write-Ok "dependencies installed"
 $ConfigDir = Join-Path $env:USERPROFILE ".config\opencode"
 $AgentDir  = Join-Path $ConfigDir "agent"
 $SkillDir  = Join-Path $ConfigDir "skills"
+$CmdDir    = Join-Path $ConfigDir "command"
 
-Write-Step "Installing AI mode + skill into $ConfigDir"
+Write-Step "Installing AI mode + /pm command + skill into $ConfigDir"
 New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SkillDir | Out-Null
+New-Item -ItemType Directory -Force -Path $CmdDir | Out-Null
 
 $agentsSrc = Join-Path $AppDir "agents"
 if (Test-Path $agentsSrc) {
@@ -61,6 +64,16 @@ if (Test-Path $agentsSrc) {
   Write-Ok "agents -> $AgentDir"
 } else {
   Write-Warn2 "no agents/ folder found (skipped)"
+}
+
+$commandsSrc = Join-Path $AppDir "commands"
+if (Test-Path $commandsSrc) {
+  Get-ChildItem -Path $commandsSrc -Force | ForEach-Object {
+    Copy-Item -Recurse -Force -Path $_.FullName -Destination $CmdDir
+  }
+  Write-Ok "commands -> $CmdDir"
+} else {
+  Write-Warn2 "no commands/ folder found (skipped)"
 }
 
 $skillsSrc = Join-Path $AppDir "skills"
@@ -81,7 +94,7 @@ Write-Host "Next steps:" -ForegroundColor White
 Write-Host "  1) Launch the app:"
 Write-Host "       cd `"$AppDir`"; npm start" -ForegroundColor Gray
 Write-Host "  2) Data root (each subfolder with a plan.json is a project):"
-Write-Host "       default: C:\Users\<you>\.claude\wiki\projects\" -ForegroundColor Gray
+Write-Host "       default: $env:USERPROFILE\ProjectConsole\projects\  (set PROJECT_CONSOLE_ROOT to override)" -ForegroundColor Gray
 Write-Host "       override: `$env:PROJECT_CONSOLE_ROOT='D:\path\to\projects'; npm start" -ForegroundColor Gray
 Write-Host "  3) Team sync: open a project -> Sync menu, or dashboard -> 加入 Git 專案." -ForegroundColor Gray
 Write-Host "  4) Optional — create the private repo with the gh CLI:"

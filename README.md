@@ -220,6 +220,7 @@ end-to-end (module load · data round-trip · Electron window) and is what
 | `smoke.js` | fresh-install smoke test (module load · data round-trip · app boot) — CI gate |
 | `harness.js` / `harness-git.js` / `harness-pb.js` | headless UI acceptance harnesses |
 | `agents/project-manager.md` | the Project-Manager AI agent mode (bundled) |
+| `commands/pm.md` | the `/pm` command that launches the mode (bundled) |
 | `skills/project-management/` | the project-management skill (bundled) |
 
 ## Electron settings

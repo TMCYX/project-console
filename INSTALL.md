@@ -2,7 +2,7 @@
 
 This file is written to be **followed by an AI coding agent** on behalf of a
 human. If you are that agent, read this whole file, then do the steps in order.
-If the human just wants the app and not the bundled AI mode, stop after Step 3.
+If the human just wants the app and not the bundled AI mode, skip Step 3.
 
 ---
 
@@ -14,7 +14,8 @@ If the human just wants the app and not the bundled AI mode, stop after Step 3.
 > Clone https://github.com/TMCYX/project-console.git into a folder of your
 > choice, then open INSTALL.md in that folder and follow it
 > exactly to install Project Console — app dependencies, the Project-Manager
-> agent mode, and the project-management skill — then tell me how to launch it.
+> agent mode (with its `/pm` command), and the project-management skill — then
+> tell me how to launch it.
 > ```
 
 The app repo is **public** — anyone can clone it; no invite needed. (Only the
@@ -69,23 +70,26 @@ ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" npm install
 If the npm registry itself is slow, add `--registry=https://registry.npmmirror.com`
 to the same command.
 
-### 3. Bundle the AI mode + skill into the user's opencode config
+### 3. Bundle the AI mode + command + skill into the user's opencode config
 
-The repo ships two things under `agents/` and `skills/`. Copy them into the
-user's opencode config directory (`~/.config/opencode/`):
+The repo ships three things under `agents/`, `commands/` and `skills/`. Copy
+them into the user's opencode config directory (`~/.config/opencode/`):
 
 ```bash
 # macOS / Linux
-mkdir -p ~/.config/opencode/agent ~/.config/opencode/skills
+mkdir -p ~/.config/opencode/agent ~/.config/opencode/command ~/.config/opencode/skills
 cp -R agents/* ~/.config/opencode/agent/
+cp -R commands/* ~/.config/opencode/command/
 cp -R skills/* ~/.config/opencode/skills/
 ```
 
 ```powershell
 # Windows (PowerShell)
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.config\opencode\agent" | Out-Null
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.config\opencode\command" | Out-Null
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.config\opencode\skills" | Out-Null
 Copy-Item -Recurse -Force "agents\*" "$env:USERPROFILE\.config\opencode\agent\"
+Copy-Item -Recurse -Force "commands\*" "$env:USERPROFILE\.config\opencode\command\"
 Copy-Item -Recurse -Force "skills\*" "$env:USERPROFILE\.config\opencode\skills\"
 ```
 
@@ -98,9 +102,9 @@ Prefer the scripts (idempotent — safe to re-run):
 powershell -ExecutionPolicy Bypass -File .\install.ps1     # Windows
 ```
 
-Both scripts check `node`/`npm`, run `npm install`, copy the mode + skill, and
-print the next steps. They do **not** overwrite anything outside
-`~/.config/opencode/`.
+Both scripts check `node`/`npm`, run `npm install`, copy the mode + the `/pm`
+command + the skill, and print the next steps. They do **not** overwrite
+anything outside `~/.config/opencode/`.
 
 ### 4. Launch (or tell the human to)
 
@@ -145,6 +149,7 @@ Requires `git` on `PATH`; publish/invite need the **`gh`** CLI logged in (`gh au
 ## Uninstall
 
 - Delete the cloned folder (the app keeps no state outside it).
-- Remove `~/.config/opencode/agent/project-manager.md` and
+- Remove `~/.config/opencode/agent/project-manager.md`,
+  `~/.config/opencode/command/pm.md` and
   `~/.config/opencode/skills/project-management/` to drop the AI mode + skill.
 - Project data lives in your data root; delete a project folder to remove it.

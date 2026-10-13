@@ -5,9 +5,10 @@
 # Idempotent: safe to re-run. It will:
 #   1) verify node + npm are available,
 #   2) npm install in the app directory,
-#   3) copy agents/* -> ~/.config/opencode/agent/  (the Project-Manager mode),
-#   4) copy skills/* -> ~/.config/opencode/skills/ (the project-management skill),
-#   5) print the next steps (launch + data root).
+#   3) copy agents/*   -> ~/.config/opencode/agent/   (the Project-Manager mode),
+#   4) copy commands/* -> ~/.config/opencode/command/ (the /pm command),
+#   5) copy skills/*   -> ~/.config/opencode/skills/  (the project-management skill),
+#   6) print the next steps (launch + data root).
 #
 # Usage:
 #   ./install.sh
@@ -42,19 +43,27 @@ step "Installing app dependencies (npm install)"
 ( cd "$APP_DIR" && npm install )
 ok "dependencies installed"
 
-# --- 3 + 4. bundle mode + skill --------------------------------------------
+# --- 3–5. bundle mode + /pm command + skill ---------------------------------
 CONFIG_DIR="${HOME}/.config/opencode"
 AGENT_DIR="${CONFIG_DIR}/agent"
 SKILL_DIR="${CONFIG_DIR}/skills"
+CMD_DIR="${CONFIG_DIR}/command"
 
-step "Installing AI mode + skill into ${CONFIG_DIR}"
-mkdir -p "$AGENT_DIR" "$SKILL_DIR"
+step "Installing AI mode + /pm command + skill into ${CONFIG_DIR}"
+mkdir -p "$AGENT_DIR" "$SKILL_DIR" "$CMD_DIR"
 
 if [ -d "$APP_DIR/agents" ]; then
   cp -R "$APP_DIR/agents/." "$AGENT_DIR/"
   ok "agents -> $AGENT_DIR"
 else
   warn "no agents/ folder found (skipped)"
+fi
+
+if [ -d "$APP_DIR/commands" ]; then
+  cp -R "$APP_DIR/commands/." "$CMD_DIR/"
+  ok "commands -> $CMD_DIR"
+else
+  warn "no commands/ folder found (skipped)"
 fi
 
 if [ -d "$APP_DIR/skills" ]; then
@@ -72,7 +81,7 @@ printf "Next steps:\n"
 printf "  1) Launch the app:\n"
 printf "${GRAY}       cd \"%s\" && npm start${NC}\n" "$APP_DIR"
 printf "  2) Data root (each subfolder with a plan.json is a project):\n"
-printf "${GRAY}       default: ~/.claude/wiki/projects/  (set PROJECT_CONSOLE_ROOT to override)${NC}\n"
+printf "${GRAY}       default: ~/ProjectConsole/projects/  (set PROJECT_CONSOLE_ROOT to override)${NC}\n"
 printf "${GRAY}       PROJECT_CONSOLE_ROOT=\"\$HOME/projects\" npm start${NC}\n"
 printf "  3) Team sync: open a project -> Sync menu, or dashboard -> 加入 Git 專案.\n"
 printf "  4) Optional — create the private repo with the gh CLI:\n"
