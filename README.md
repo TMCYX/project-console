@@ -53,7 +53,7 @@ Requirements: **Node.js ≥ 18** (Electron 33), and for team sync, **git** on yo
 
 ```bash
 cd project-manager
-npm install          # installs Electron (the only dependency)
+npm install          # installs Electron (~110 MB download — the only dependency)
 npm run smoke        # optional: verify this copy boots (the same check CI runs)
 npm start            # launch the app
 ```

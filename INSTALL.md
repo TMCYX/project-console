@@ -11,15 +11,15 @@ If the human just wants the app and not the bundled AI mode, stop after Step 3.
 > Clone this repo and install Project Console for me:
 >
 > ```
-> Clone <REPO_URL> (e.g. https://github.com/<owner>/project-console.git) into a
-> folder of your choice, then open INSTALL.md in that folder and follow it
+> Clone https://github.com/TMCYX/project-console.git into a folder of your
+> choice, then open INSTALL.md in that folder and follow it
 > exactly to install Project Console — app dependencies, the Project-Manager
 > agent mode, and the project-management skill — then tell me how to launch it.
 > ```
 
-Replace `<REPO_URL>` with the actual repository URL. The app repo is
-**public** — anyone can clone it, no invite needed. (Only the *project* repos
-you later sync through the app are private — those are shared by invitation.)
+The app repo is **public** — anyone can clone it; no invite needed. (Only the
+*project* repos you later sync through the app are private — those are shared
+by invitation.)
 
 ---
 
@@ -50,6 +50,24 @@ npm install        # installs Electron — the only dependency
 Quick sanity check (recommended — CI runs this on every push): `npm run smoke`
 proves this copy boots end-to-end (module load · data layer · Electron window)
 and exits 0 on success.
+
+**Slow download?** The app's code is under 1 MB — the one big download is
+Electron (~110 MB), pulled in by `npm install`; on a slow or throttled route to
+GitHub that is what takes long (can be many minutes). If GitHub is slow or
+blocked where you are, mirror it:
+
+```powershell
+# Windows (PowerShell)
+$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"; npm install
+```
+
+```bash
+# macOS / Linux
+ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" npm install
+```
+
+If the npm registry itself is slow, add `--registry=https://registry.npmmirror.com`
+to the same command.
 
 ### 3. Bundle the AI mode + skill into the user's opencode config
 
