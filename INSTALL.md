@@ -17,8 +17,9 @@ If the human just wants the app and not the bundled AI mode, stop after Step 3.
 > agent mode, and the project-management skill — then tell me how to launch it.
 > ```
 
-Replace `<REPO_URL>` with the actual repository URL (it is a **private** repo:
-the human must have been invited as a collaborator).
+Replace `<REPO_URL>` with the actual repository URL. The app repo is
+**public** — anyone can clone it, no invite needed. (Only the *project* repos
+you later sync through the app are private — those are shared by invitation.)
 
 ---
 
@@ -45,6 +46,10 @@ cd project-console
 ```bash
 npm install        # installs Electron — the only dependency
 ```
+
+Quick sanity check (recommended — CI runs this on every push): `npm run smoke`
+proves this copy boots end-to-end (module load · data layer · Electron window)
+and exits 0 on success.
 
 ### 3. Bundle the AI mode + skill into the user's opencode config
 
@@ -109,9 +114,11 @@ Requires `git` on `PATH`; publish/invite need the **`gh`** CLI logged in (`gh au
 
 ## For the human — TL;DR
 
-1. Get the repo URL from whoever owns it (you must be a collaborator).
+1. Copy the app repo URL from whoever shared it (the app repo is public).
 2. Have your agent run the prompt above, **or** do it by hand:
    `git clone <URL> && cd project-console && npm install && npm start`.
+   If the app fails to open, run `npm run smoke` and send the output to the
+   owner — it pinpoints which layer fails (module load / data / app boot).
 3. To also install the AI planning mode: run `./install.sh` (mac/Linux) or
    `install.ps1` (Windows).
 

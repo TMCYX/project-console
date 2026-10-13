@@ -1,5 +1,7 @@
 # Project Console
 
+[![CI](https://github.com/TMCYX/project-console/actions/workflows/ci.yml/badge.svg)](https://github.com/TMCYX/project-console/actions/workflows/ci.yml)
+
 **Project Console** is a local-first desktop app that turns a folder of project
 plans into a live **總覽 · WBS · 進度 · 甘特** console — and, in the team build,
 syncs those plans across machines through a private GitHub repo.
@@ -52,6 +54,7 @@ Requirements: **Node.js ≥ 18** (Electron 33), and for team sync, **git** on yo
 ```bash
 cd project-manager
 npm install          # installs Electron (the only dependency)
+npm run smoke        # optional: verify this copy boots (the same check CI runs)
 npm start            # launch the app
 ```
 
@@ -181,7 +184,8 @@ restores whole files.
 ## Testing (headless)
 
 ```bash
-node selftest.js
+npm run smoke        # fresh-install smoke — module load (config-less) · data round-trip · Electron boot
+node selftest.js     # full data-layer contract tests (needs a data root holding the _demo fixture)
 ```
 
 Scans the data root, asserts the `plan@2` / `progress@1` contract and the
@@ -190,6 +194,10 @@ round-trip tick on a **temp copy** (the real `_demo/progress.json` is never
 touched), and exercises the **binding + git layer + share/history/my-day/merge**
 on **temp repos** (field-level merge, two-writer conflicts, commit history &
 restore). Prints `RESULT: PASS` / `FAIL` (exit 0 / 1).
+
+`npm run smoke`, by contrast, needs no fixture: it proves a fresh clone boots
+end-to-end (module load · data round-trip · Electron window) and is what
+[CI](.github/workflows/ci.yml) runs on every push.
 
 ```bash
 ./node_modules/.bin/electron harness.js        # UI acceptance (in-app guide)
@@ -209,6 +217,7 @@ restore). Prints `RESULT: PASS` / `FAIL` (exit 0 / 1).
 | `renderer/styles.css` | Swiss-industrial theme — all design tokens in `:root` |
 | `renderer/renderer.js` | the four views + inline-SVG Gantt + ticking + sync UI |
 | `selftest.js` | headless data-layer tests |
+| `smoke.js` | fresh-install smoke test (module load · data round-trip · app boot) — CI gate |
 | `harness.js` / `harness-git.js` / `harness-pb.js` | headless UI acceptance harnesses |
 | `agents/project-manager.md` | the Project-Manager AI agent mode (bundled) |
 | `skills/project-management/` | the project-management skill (bundled) |

@@ -178,6 +178,13 @@ let pollTimer = null;
 let debounceTimer = null;
 let lastSignature = null;
 
+/* Test hook: `electron . --smoke-exit` boots the full app (main process, window,
+ * preload, renderer) against whatever data root is set, waits until the portfolio
+ * rail has rendered, prints SMOKE-OK and exits 0 — or prints SMOKE-FAIL and
+ * exits 1. Used by smoke.js / CI to prove a fresh clone actually starts; inert
+ * in normal runs (npm start never passes the flag). */
+const SMOKE_EXIT = process.argv.includes('--smoke-exit');
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -200,6 +207,41 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  if (SMOKE_EXIT) runSmokeExit();
+}
+
+/**
+ * `--smoke-exit` support (see smoke.js / CI): wait for the renderer to finish
+ * loading and for the portfolio rail to render, then exit 0; a failed load or a
+ * 20 s silence exits 1. Inert unless the flag is passed.
+ */
+async function runSmokeExit() {
+  let timer = null;
+  const done = (ok, detail) => {
+    if (timer) clearTimeout(timer);
+    if (ok) process.stdout.write('SMOKE-OK\n');
+    else process.stderr.write(`SMOKE-FAIL: ${detail}\n`);
+    app.exit(ok ? 0 : 1);
+  };
+  timer = setTimeout(() => done(false, 'timed out waiting for the UI'), 20000);
+  try {
+    await new Promise((resolve, reject) => {
+      mainWindow.webContents.once('did-finish-load', resolve);
+      mainWindow.webContents.once('did-fail-load', (_e, code, desc) =>
+        reject(new Error(`did-fail-load ${code} ${desc}`))
+      );
+    });
+    for (;;) {
+      const rendered = await mainWindow.webContents.executeJavaScript(
+        "(() => { const l = document.getElementById('portfolio-list'); return !!l && (l.querySelector('.pcard') !== null || l.querySelector('.empty') !== null); })()"
+      );
+      if (rendered) return done(true);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  } catch (err) {
+    done(false, err.message);
+  }
 }
 
 function broadcast(reason) {
